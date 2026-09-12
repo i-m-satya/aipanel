@@ -12,10 +12,16 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+# Only first-party actions are used here (actions/checkout). PHP comes from the
+# official container images rather than a marketplace setup action, so this
+# workflow still runs under an Actions policy that restricts third-party
+# actions.
+
 jobs:
   tests:
     name: Tests (PHP ${{ matrix.php }})
     runs-on: ubuntu-latest
+    container: php:${{ matrix.php }}-cli
 
     strategy:
       fail-fast: false
@@ -23,25 +29,17 @@ jobs:
         php: ['8.3', '8.4']
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Install toolchain
+        run: |
+          apt-get update -qq
+          apt-get install -y -qq --no-install-recommends git unzip
+          curl -sS https://getcomposer.org/installer | php -- \
+            --install-dir=/usr/local/bin --filename=composer
 
-      - name: Set up PHP
-        uses: shivammathur/setup-php@v2
-        with:
-          php-version: ${{ matrix.php }}
-          extensions: pdo_mysql, openssl, curl, mbstring
-          coverage: none
-          ini-values: error_reporting=E_ALL
+      - uses: actions/checkout@v4
 
       - name: Validate composer.json
         run: composer validate --strict --no-check-publish
-
-      - name: Cache Composer packages
-        uses: actions/cache@v4
-        with:
-          path: ~/.composer/cache
-          key: composer-${{ matrix.php }}-${{ hashFiles('composer.lock') }}
-          restore-keys: composer-${{ matrix.php }}-
 
       - name: Install dependencies
         run: composer install --no-interaction --prefer-dist --no-progress
@@ -52,15 +50,15 @@ jobs:
   lint:
     name: Lint
     runs-on: ubuntu-latest
+    container: php:8.3-cli
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Install toolchain
+        run: |
+          apt-get update -qq
+          apt-get install -y -qq --no-install-recommends git shellcheck
 
-      - name: Set up PHP
-        uses: shivammathur/setup-php@v2
-        with:
-          php-version: '8.3'
-          coverage: none
+      - uses: actions/checkout@v4
 
       # The node agent, the CLI entry points and the views sit outside the
       # autoloader, so the test suite never loads them. A syntax sweep is what
@@ -71,11 +69,11 @@ jobs:
             | xargs -0 -n1 -P4 php -l
 
       # The restricted shell is the boundary between a tenant's SSH session and
-      # the rest of the node; a syntax error in it is a security failure.
+      # the rest of the node; a break in it is a security failure, not a style
+      # one, so its allowlist is asserted rather than assumed.
       - name: Check the restricted shell
         run: |
           sh -n agent/bin/aipanel-shell
-          sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
           shellcheck --shell=sh agent/bin/aipanel-shell
 
       - name: Verify the restricted shell's allowlist still holds
@@ -101,6 +99,7 @@ jobs:
   schema:
     name: Schema
     runs-on: ubuntu-latest
+    container: php:8.3-cli
 
     services:
       mysql:
@@ -108,30 +107,31 @@ jobs:
         env:
           MYSQL_ROOT_PASSWORD: root
           MYSQL_DATABASE: aipanel
-        ports: [ '3306:3306' ]
         options: >-
           --health-cmd="mysqladmin ping -h localhost -uroot -proot"
           --health-interval=5s --health-timeout=5s --health-retries=20
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Install toolchain
+        run: |
+          apt-get update -qq
+          apt-get install -y -qq --no-install-recommends git unzip
+          docker-php-ext-install pdo_mysql
+          curl -sS https://getcomposer.org/installer | php -- \
+            --install-dir=/usr/local/bin --filename=composer
 
-      - name: Set up PHP
-        uses: shivammathur/setup-php@v2
-        with:
-          php-version: '8.3'
-          extensions: pdo_mysql
-          coverage: none
+      - uses: actions/checkout@v4
 
       - name: Install dependencies
         run: composer install --no-interaction --prefer-dist --no-progress
 
-      # Migrations run against a real MySQL: a broken constraint or a column
-      # that a later migration depends on fails here, not on someone's server.
+      # Migrations run against a real MySQL: a broken constraint, or a column a
+      # later migration depends on, fails here rather than on someone's server.
+      # The service is reachable by its label from inside the job container.
       - name: Apply migrations
         env:
           APP_ENV: ci
-          DB_DSN: mysql:host=127.0.0.1;port=3306;dbname=aipanel;charset=utf8mb4
+          DB_DSN: mysql:host=mysql;port=3306;dbname=aipanel;charset=utf8mb4
           DB_USER: root
           DB_PASS: root
           REDIS_DSN: ''
@@ -142,7 +142,7 @@ jobs:
       - name: Migrations are idempotent
         env:
           APP_ENV: ci
-          DB_DSN: mysql:host=127.0.0.1;port=3306;dbname=aipanel;charset=utf8mb4
+          DB_DSN: mysql:host=mysql;port=3306;dbname=aipanel;charset=utf8mb4
           DB_USER: root
           DB_PASS: root
           REDIS_DSN: ''
