@@ -2,5 +2,4 @@
 /.env
 /storage/*
 !/storage/.gitkeep
-composer.lock
 .phpunit.result.cache

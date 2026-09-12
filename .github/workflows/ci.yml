@@ -1,0 +1,154 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    name: Tests (PHP ${{ matrix.php }})
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        php: ['8.3', '8.4']
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php }}
+          extensions: pdo_mysql, openssl, curl, mbstring
+          coverage: none
+          ini-values: error_reporting=E_ALL
+
+      - name: Validate composer.json
+        run: composer validate --strict --no-check-publish
+
+      - name: Cache Composer packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.composer/cache
+          key: composer-${{ matrix.php }}-${{ hashFiles('composer.lock') }}
+          restore-keys: composer-${{ matrix.php }}-
+
+      - name: Install dependencies
+        run: composer install --no-interaction --prefer-dist --no-progress
+
+      - name: Run tests
+        run: vendor/bin/phpunit --no-coverage
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          coverage: none
+
+      # The node agent, the CLI entry points and the views sit outside the
+      # autoloader, so the test suite never loads them. A syntax sweep is what
+      # catches a typo there before it reaches a managed host.
+      - name: Syntax-check every PHP file
+        run: |
+          find . -path ./vendor -prune -o -name '*.php' -print0 \
+            | xargs -0 -n1 -P4 php -l
+
+      # The restricted shell is the boundary between a tenant's SSH session and
+      # the rest of the node; a syntax error in it is a security failure.
+      - name: Check the restricted shell
+        run: |
+          sh -n agent/bin/aipanel-shell
+          sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
+          shellcheck --shell=sh agent/bin/aipanel-shell
+
+      - name: Verify the restricted shell's allowlist still holds
+        run: |
+          set -e
+          assert_denied() {
+            if SSH_ORIGINAL_COMMAND="$1" sh agent/bin/aipanel-shell >/dev/null 2>&1; then
+              echo "SECURITY: '$1' was permitted by the restricted shell"; exit 1
+            fi
+          }
+          assert_allowed() {
+            if ! SSH_ORIGINAL_COMMAND="$1" sh agent/bin/aipanel-shell >/dev/null 2>&1; then
+              echo "'$1' should be permitted but was denied"; exit 1
+            fi
+          }
+          assert_allowed "git status"
+          assert_denied "nc -l 1234"
+          assert_denied "cat /etc/shadow; id"
+          assert_denied "ls \$(whoami)"
+          assert_denied "/usr/bin/nc -l 1234"
+          echo "restricted shell allowlist holds"
+
+  schema:
+    name: Schema
+    runs-on: ubuntu-latest
+
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: root
+          MYSQL_DATABASE: aipanel
+        ports: [ '3306:3306' ]
+        options: >-
+          --health-cmd="mysqladmin ping -h localhost -uroot -proot"
+          --health-interval=5s --health-timeout=5s --health-retries=20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: pdo_mysql
+          coverage: none
+
+      - name: Install dependencies
+        run: composer install --no-interaction --prefer-dist --no-progress
+
+      # Migrations run against a real MySQL: a broken constraint or a column
+      # that a later migration depends on fails here, not on someone's server.
+      - name: Apply migrations
+        env:
+          APP_ENV: ci
+          DB_DSN: mysql:host=127.0.0.1;port=3306;dbname=aipanel;charset=utf8mb4
+          DB_USER: root
+          DB_PASS: root
+          REDIS_DSN: ''
+        run: |
+          export APP_KEY="$(php -r 'echo base64_encode(random_bytes(32));')"
+          php bin/console.php migrate
+
+      - name: Migrations are idempotent
+        env:
+          APP_ENV: ci
+          DB_DSN: mysql:host=127.0.0.1;port=3306;dbname=aipanel;charset=utf8mb4
+          DB_USER: root
+          DB_PASS: root
+          REDIS_DSN: ''
+        run: |
+          export APP_KEY="$(php -r 'echo base64_encode(random_bytes(32));')"
+          output="$(php bin/console.php migrate)"
+          echo "$output"
+          echo "$output" | grep -q 'Nothing to migrate' \
+            || { echo 'Re-running migrations was not a no-op'; exit 1; }

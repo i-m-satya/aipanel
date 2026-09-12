@@ -44,11 +44,78 @@ final class Migrator
         return $ran;
     }
 
-    /** @return list<string> */
+    /**
+     * Split a migration file into individual statements.
+     *
+     * Naive splitting is why this is hand-written: splitting on ";\n" and then
+     * discarding chunks that begin with "--" silently drops every statement
+     * that happens to be preceded by a comment. This walks the SQL instead,
+     * tracking quoting so a semicolon or comment marker inside a string or a
+     * backticked identifier is not treated as syntax.
+     *
+     * @return list<string>
+     */
     private function statements(string $sql): array
     {
-        $parts = array_map('trim', explode(";\n", $sql . "\n"));
+        $statements = [];
+        $current = '';
+        $length = strlen($sql);
+        $quote = null; // ' " or ` when inside a quoted region
 
-        return array_values(array_filter($parts, static fn (string $s): bool => $s !== '' && !str_starts_with($s, '--')));
+        for ($i = 0; $i < $length; $i++) {
+            $char = $sql[$i];
+
+            if ($quote !== null) {
+                $current .= $char;
+                if ($char === '\\' && $i + 1 < $length) {
+                    $current .= $sql[++$i]; // escaped character, never a delimiter
+                    continue;
+                }
+                if ($char === $quote) {
+                    $quote = null;
+                }
+                continue;
+            }
+
+            // Line comment: drop it through to the end of the line.
+            if ($char === '-' && ($sql[$i + 1] ?? '') === '-') {
+                while ($i < $length && $sql[$i] !== "\n") {
+                    $i++;
+                }
+                $current .= "\n";
+                continue;
+            }
+
+            // Block comment. MySQL executable comments (/*! ... */) are left
+            // intact so version-gated DDL still reaches the server.
+            if ($char === '/' && ($sql[$i + 1] ?? '') === '*' && ($sql[$i + 2] ?? '') !== '!') {
+                $end = strpos($sql, '*/', $i + 2);
+                $i = $end === false ? $length : $end + 1;
+                continue;
+            }
+
+            if ($char === "'" || $char === '"' || $char === '`') {
+                $quote = $char;
+                $current .= $char;
+                continue;
+            }
+
+            if ($char === ';') {
+                $statements[] = $current;
+                $current = '';
+                continue;
+            }
+
+            $current .= $char;
+        }
+
+        $statements[] = $current;
+
+        // A trailing statement without a semicolon is still a statement; an
+        // empty tail (or a file that is only comments) is not.
+        return array_values(array_filter(
+            array_map('trim', $statements),
+            static fn (string $statement): bool => $statement !== ''
+        ));
     }
 }
