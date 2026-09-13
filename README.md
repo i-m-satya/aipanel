@@ -72,13 +72,16 @@ One command on any Linux server (Debian/Ubuntu, RHEL/Rocky/Alma/Fedora, or Alpin
 curl -fsSL https://raw.githubusercontent.com/i-m-satya/aipanel/main/install.sh | sudo sh
 ```
 
-Installing from a **private** fork needs a token with read access to it, since
-both fetching the script and cloning the panel are authenticated then:
+Installing from a **fork** needs the fork's clone URL too — downloading the
+script from a fork does not by itself install that fork, because the installer
+clones `AIPANEL_REPO` rather than wherever it was downloaded from. A private
+fork also needs a token with read access to it:
 
 ```bash
 curl -fsSL -H "Authorization: Bearer $GH_TOKEN" \
   https://raw.githubusercontent.com/<owner>/<repo>/main/install.sh \
-  | sudo AIPANEL_TOKEN="$GH_TOKEN" sh
+  | sudo AIPANEL_TOKEN="$GH_TOKEN" \
+         AIPANEL_REPO="https://github.com/<owner>/<repo>.git" sh
 ```
 
 Pick the port it listens on — it prompts, or pass it non-interactively:
