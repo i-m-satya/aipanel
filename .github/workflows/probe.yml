@@ -1,0 +1,32 @@
+name: Probe
+
+# Temporary diagnostic: isolates why CI jobs fail instantly without a runner.
+# Each job removes one variable — bare runner, then checkout, then container.
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  bare:
+    name: Probe A — bare runner, no actions, no container
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "runner reached"
+
+  with-checkout:
+    name: Probe B — first-party checkout only
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: echo "checkout reached"
+
+  in-container:
+    name: Probe C — job container
+    runs-on: ubuntu-latest
+    container: php:8.3-cli
+    steps:
+      - run: php -v
