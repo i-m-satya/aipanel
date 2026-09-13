@@ -21,6 +21,9 @@ deny() {
 # Shell metacharacters would let an allowed command smuggle a denied one past
 # the allowlist check, so they are refused outright.
 has_metachars() {
+    # The patterns are deliberately literal: these characters are being matched
+    # as text, not expanded.
+    # shellcheck disable=SC2016
     case "$1" in
         *';'*|*'&'*|*'|'*|*'`'*|*'$('*|*'>'*|*'<'*|*'\n'*) return 0 ;;
     esac

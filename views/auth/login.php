@@ -2,7 +2,14 @@
 
 <div class="card" style="max-width:420px;margin:60px auto;text-align:center">
   <h1>aipanel</h1>
-  <p class="sub">Every site is a GitHub repo. Sign in with the account that owns them.</p>
+  <?php if (!empty($unclaimed)): ?>
+    <p class="sub">
+      This installation has no admin yet.<br>
+      <strong>The first GitHub account to sign in becomes the administrator.</strong>
+    </p>
+  <?php else: ?>
+    <p class="sub">Every site is a GitHub repo. Sign in with the account that owns them.</p>
+  <?php endif; ?>
 
   <?php if (!empty($reason)): ?>
     <p class="pill failed" style="display:block;padding:10px">
@@ -11,6 +18,7 @@
           'denied'   => 'GitHub authorisation was cancelled.',
           'disabled' => 'This account is disabled. Contact your account owner.',
           'error'    => 'Sign-in failed: ' . ($detail ?? 'unknown error'),
+          'not_invited' => '@' . ($detail ?? 'that account') . ' has not been invited to this panel. Ask its administrator to invite you.',
           default    => 'Please sign in to continue.',
       }) ?>
     </p>

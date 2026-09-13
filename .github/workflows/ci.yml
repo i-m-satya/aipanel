@@ -71,10 +71,11 @@ jobs:
       # The restricted shell is the boundary between a tenant's SSH session and
       # the rest of the node; a break in it is a security failure, not a style
       # one, so its allowlist is asserted rather than assumed.
-      - name: Check the restricted shell
+      - name: Check the shell scripts
         run: |
+          sh -n install.sh
           sh -n agent/bin/aipanel-shell
-          shellcheck --shell=sh agent/bin/aipanel-shell
+          shellcheck --shell=sh install.sh agent/bin/aipanel-shell
 
       - name: Verify the restricted shell's allowlist still holds
         run: |

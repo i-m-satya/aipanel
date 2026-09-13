@@ -47,7 +47,68 @@ website.
 
 ---
 
-## Quick start
+## Install
+
+One command on any Linux server (Debian/Ubuntu, RHEL/Rocky/Alma/Fedora, or Alpine):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/i-m-satya/aipanel/main/install.sh | sudo sh
+```
+
+Pick the port it listens on — it prompts, or pass it non-interactively:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/i-m-satya/aipanel/main/install.sh \
+  | sudo sh -s -- --port 2087 --yes
+```
+
+The installer puts PHP, MariaDB and the panel in place, generates the app key
+and database credentials, applies migrations, installs systemd units for the
+web, worker, code-worker and scheduler processes, opens the port in `ufw` or
+`firewalld` if either is active, and then prints what to do next.
+
+### Then: connect GitHub and claim the panel
+
+Sign-in is GitHub-only, so the panel needs an OAuth app before anyone can log
+in. Create one at <https://github.com/settings/developers> with the callback
+URL the installer printed:
+
+```
+Homepage URL:               http://<server>:<port>
+Authorization callback URL: http://<server>:<port>/auth/github/callback
+```
+
+Put the credentials in `/opt/aipanel/.env` and restart:
+
+```bash
+GITHUB_OAUTH_CLIENT_ID=...
+GITHUB_OAUTH_CLIENT_SECRET=...
+
+systemctl restart aipanel
+```
+
+Then open the panel and sign in with GitHub. **The first GitHub account to
+sign in becomes the administrator.** After that, signing in is not enough —
+a GitHub account must have been invited by the admin, so an installation
+reachable on the internet is not open to anyone with a GitHub account:
+
+```bash
+php /opt/aipanel/bin/console.php user:invite some-github-login user
+```
+
+Put a TLS terminator in front before exposing it publicly; the installer
+serves plain HTTP on the port you chose.
+
+### Add a website
+
+In the panel: give a domain and a GitHub repository. aipanel provisions the
+tenant — jailed Linux user, chrooted SSH, PHP-FPM pool, vhost, release layout
+— and registers the node's read-only deploy key on the repo. From then on,
+every update to `main` builds and goes live automatically.
+
+---
+
+## Development
 
 ```bash
 cp .env.example .env
@@ -56,10 +117,6 @@ docker compose up -d
 docker compose exec app php bin/console.php migrate
 open http://localhost:8080
 ```
-
-Sign-in is GitHub-only, so set `GITHUB_OAUTH_CLIENT_ID` / `..._SECRET` in
-`.env` before logging in. aipanel stores no passwords: access is granted and
-revoked entirely in GitHub.
 
 ### Registering a node
 

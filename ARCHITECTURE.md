@@ -52,6 +52,24 @@ A tenant who fully owns their own PHP process still sees exactly one website.
 
 ---
 
+## 1.2 Installation and bootstrap
+
+`install.sh` is a single command on a fresh Linux server: it installs PHP,
+MariaDB and the panel, generates the app key and database credentials, applies
+migrations, and registers systemd units for the four long-lived processes (web,
+ops worker, code worker, scheduler). The listening port is a parameter, because
+a control panel usually shares a host with something else.
+
+The panel then has no users, and says so on its login page. **The first GitHub
+account to sign in claims the installation and becomes its admin** — recorded
+in `settings.installation_admin`, so the claim can only happen once. Everyone
+afterwards needs an invite (`user_invites`, keyed on GitHub login): a panel on a
+public address is not open to anyone who has a GitHub account and finds the URL.
+There is no password to set, rotate or leak — GitHub is the only identity
+provider, and revoking a user there revokes them here.
+
+---
+
 ## 2. Planes
 
 ```

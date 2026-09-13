@@ -10,6 +10,7 @@ declare(strict_types=1);
  *   php bin/console.php node:add <host> <url> <role>
  *   php bin/console.php node:deploy-key <id>    generate the node's read-only deploy key
  *   php bin/console.php github:install <installation_id> <account_id> <login>
+ *   php bin/console.php user:invite <github-login> [owner|user|admin]
  *   php bin/console.php queue:status
  */
 
@@ -108,6 +109,43 @@ try {
 
             fwrite(STDOUT, "Installation {$installationId} linked to account {$accountId}.\n");
             fwrite(STDOUT, "Set this as the App's webhook secret in GitHub:\n\n{$secret}\n");
+            break;
+
+        case 'user:invite':
+            $login = strtolower((string) ($args[0] ?? ''));
+            $role = (string) ($args[1] ?? 'user');
+            if ($login === '') {
+                throw new RuntimeException('Usage: user:invite <github-login> [owner|user|admin]');
+            }
+            if (!in_array($role, ['owner', 'user', 'admin'], true)) {
+                throw new RuntimeException("Role must be owner, user or admin; got '{$role}'.");
+            }
+
+            $users = $container->get(AIPanel\Domain\UserRepository::class);
+            if ($users->isUnclaimed()) {
+                throw new RuntimeException(
+                    'This installation has no admin yet. Sign in with GitHub first — the first account to sign in becomes the admin.'
+                );
+            }
+
+            // Invites attach to the admin's account: the first user to claim
+            // the installation owns it.
+            $admin = $container->get(Database::class)->selectOne(
+                "SELECT u.id, u.account_id, u.github_login
+                 FROM users u
+                 JOIN settings s ON s.name = 'installation_admin' AND s.value = u.id"
+            ) ?? $container->get(Database::class)->selectOne(
+                'SELECT id, account_id, github_login FROM users ORDER BY id LIMIT 1'
+            );
+
+            if ($admin === null) {
+                throw new RuntimeException('Could not determine the installation admin.');
+            }
+
+            $users->invite($login, (int) $admin['account_id'], $role, (int) $admin['id']);
+
+            fwrite(STDOUT, "Invited @{$login} as {$role} to account {$admin['account_id']}.\n");
+            fwrite(STDOUT, "They can now sign in with GitHub.\n");
             break;
 
         case 'queue:status':

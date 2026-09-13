@@ -32,6 +32,9 @@ final class AuthController
 
         return Response::html($this->view->render('auth/login', [
             'reason' => $request->input('reason'),
+            // On a fresh installation the login page says so: whoever signs in
+            // first becomes the admin.
+            'unclaimed' => $this->users->isUnclaimed(),
         ]));
     }
 
@@ -69,7 +72,17 @@ final class AuthController
             ]), 400);
         }
 
-        $user = $this->users->upsertFromGithub($profile);
+        $user = $this->users->resolveFromGithub($profile);
+
+        // No user row means this GitHub account has not been invited, and the
+        // installation already has an admin. Say so plainly rather than
+        // silently creating an account for anyone who finds the URL.
+        if ($user === null) {
+            return Response::html($this->view->render('auth/login', [
+                'reason' => 'not_invited',
+                'detail' => $profile['login'],
+            ]), 403);
+        }
 
         if (!$this->users->isActive($user)) {
             return Response::html($this->view->render('auth/login', ['reason' => 'disabled']), 403);
