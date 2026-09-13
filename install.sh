@@ -5,8 +5,8 @@
 #   curl -fsSL https://raw.githubusercontent.com/i-m-satya/aipanel/main/install.sh | sh
 #   curl -fsSL .../install.sh | sh -s -- --port 2087
 #
-# While the repository is private, both fetching this script and cloning the
-# panel need a GitHub token with read access to it:
+# Installing from a private fork needs a GitHub token with read access to it,
+# since both fetching this script and cloning the panel are authenticated then:
 #
 #   curl -fsSL -H "Authorization: Bearer $GH_TOKEN" \
 #     https://raw.githubusercontent.com/i-m-satya/aipanel/main/install.sh \
@@ -47,7 +47,7 @@ aipanel installer
   --port <n>      port the panel listens on (default: ${PORT})
   --dir <path>    install directory (default: ${INSTALL_DIR})
   --branch <ref>  branch or tag to install (default: ${BRANCH})
-  --token <tok>   GitHub token, required while the repository is private
+  --token <tok>   GitHub token, for installing from a private fork
   --yes           do not prompt; accept defaults
   --help          show this message
 
@@ -169,9 +169,9 @@ fi
 
 step "Installing aipanel into ${INSTALL_DIR}"
 
-# A token is only needed while the repository is private. It is passed to git
-# through an askpass helper rather than embedded in the remote URL, so it never
-# lands in .git/config, the reflog, or a later `git remote -v`.
+# A token is only needed for a private repository. It is passed to git through
+# an askpass helper rather than embedded in the remote URL, so it never lands
+# in .git/config, the reflog, or a later `git remote -v`.
 if [ -n "$TOKEN" ]; then
     ASKPASS="$(mktemp)"
     cat > "$ASKPASS" <<ASK
@@ -198,7 +198,7 @@ if [ -d "${INSTALL_DIR}/.git" ]; then
 elif ! git clone --quiet --branch "$BRANCH" --depth 1 "$REPO_URL" "$INSTALL_DIR"; then
     if [ -z "$TOKEN" ]; then
         die "could not clone ${REPO_URL}.
-  The repository is private, so the installer needs a GitHub token with read
+  If that repository is private, the installer needs a GitHub token with read
   access to it. Re-run with:  sudo AIPANEL_TOKEN=<token> sh install.sh"
     fi
     die "could not clone ${REPO_URL} — check that the token has read access to it"
