@@ -1,0 +1,77 @@
+# Local development stack for the aipanel control plane.
+#
+# The control plane, workers and scheduler are the same image with different
+# commands — that is the point of a stateless control plane: scale any of them
+# by raising `replicas`, with no coordination beyond the database.
+
+services:
+  app:
+    build: { context: ., dockerfile: docker/php/Dockerfile }
+    env_file: .env
+    depends_on:
+      db: { condition: service_healthy }
+      redis: { condition: service_started }
+    volumes: [ ".:/app" ]
+
+  web:
+    image: nginx:alpine
+    ports: [ "8080:80" ]
+    volumes:
+      - ./docker/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - .:/app
+    depends_on: [ app ]
+
+  # Ops jobs: talks to node agents over HMAC-signed HTTPS.
+  worker:
+    build: { context: ., dockerfile: docker/php/Dockerfile }
+    command: php bin/worker.php
+    env_file: .env
+    depends_on:
+      db: { condition: service_healthy }
+    deploy:
+      replicas: 2
+
+  # AI code jobs: clones repos into throwaway sandboxes and opens PRs.
+  # Deliberately a separate pool — it never touches a web node.
+  code-worker:
+    build: { context: ., dockerfile: docker/php/Dockerfile }
+    command: php bin/code-worker.php
+    env_file: .env
+    depends_on:
+      db: { condition: service_healthy }
+
+  # Leader-elected: safe to run more than one, only one does the work.
+  scheduler:
+    build: { context: ., dockerfile: docker/php/Dockerfile }
+    command: php bin/scheduler.php
+    env_file: .env
+    depends_on:
+      db: { condition: service_healthy }
+
+  db:
+    image: mysql:8.0
+    environment:
+      MYSQL_DATABASE: aipanel
+      MYSQL_USER: aipanel
+      MYSQL_PASSWORD: secret
+      MYSQL_ROOT_PASSWORD: root
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-proot"]
+      interval: 5s
+      retries: 20
+    volumes: [ "db-data:/var/lib/mysql" ]
+
+  redis:
+    image: redis:7-alpine
+    command: redis-server --save "" --appendonly no
+
+  # Stands in for a managed node so the agent path can be exercised locally.
+  node-agent:
+    build: { context: ., dockerfile: docker/php/Dockerfile }
+    command: php -S 0.0.0.0:9443 agent/aipanel-agent.php
+    environment:
+      AIPANEL_AGENT_SECRET: dev-node-secret
+      AIPANEL_AGENT_ROLE: web
+
+volumes:
+  db-data:

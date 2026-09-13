@@ -1,0 +1,35 @@
+{
+    "name": "aipanel/aipanel",
+    "description": "AI-powered hosting control panel for LAMP-style servers",
+    "type": "project",
+    "license": "MIT",
+    "require": {
+        "php": ">=8.3",
+        "ext-json": "*",
+        "ext-pdo": "*",
+        "anthropic-ai/sdk": "^0.5",
+        "guzzlehttp/guzzle": "^7.9"
+    },
+    "require-dev": {
+        "phpunit/phpunit": "^11.0"
+    },
+    "autoload": {
+        "psr-4": {
+            "AIPanel\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "AIPanel\\Tests\\": "tests/"
+        }
+    },
+    "scripts": {
+        "migrate": "php bin/console.php migrate",
+        "serve": "php -S 127.0.0.1:8080 -t public",
+        "worker": "php bin/worker.php",
+        "test": "phpunit"
+    },
+    "config": {
+        "sort-packages": true
+    }
+}

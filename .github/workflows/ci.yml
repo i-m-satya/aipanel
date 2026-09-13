@@ -1,0 +1,155 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+# Only first-party actions are used here (actions/checkout). PHP comes from the
+# official container images rather than a marketplace setup action, so this
+# workflow still runs under an Actions policy that restricts third-party
+# actions.
+
+jobs:
+  tests:
+    name: Tests (PHP ${{ matrix.php }})
+    runs-on: ubuntu-latest
+    container: php:${{ matrix.php }}-cli
+
+    strategy:
+      fail-fast: false
+      matrix:
+        php: ['8.3', '8.4']
+
+    steps:
+      - name: Install toolchain
+        run: |
+          apt-get update -qq
+          apt-get install -y -qq --no-install-recommends git unzip
+          curl -sS https://getcomposer.org/installer | php -- \
+            --install-dir=/usr/local/bin --filename=composer
+
+      - uses: actions/checkout@v4
+
+      - name: Validate composer.json
+        run: composer validate --strict --no-check-publish
+
+      - name: Install dependencies
+        run: composer install --no-interaction --prefer-dist --no-progress
+
+      - name: Run tests
+        run: vendor/bin/phpunit --no-coverage
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    container: php:8.3-cli
+
+    steps:
+      - name: Install toolchain
+        run: |
+          apt-get update -qq
+          apt-get install -y -qq --no-install-recommends git shellcheck
+
+      - uses: actions/checkout@v4
+
+      # The node agent, the CLI entry points and the views sit outside the
+      # autoloader, so the test suite never loads them. A syntax sweep is what
+      # catches a typo there before it reaches a managed host.
+      - name: Syntax-check every PHP file
+        run: |
+          find . -path ./vendor -prune -o -name '*.php' -print0 \
+            | xargs -0 -n1 -P4 php -l
+
+      # The restricted shell is the boundary between a tenant's SSH session and
+      # the rest of the node; a break in it is a security failure, not a style
+      # one, so its allowlist is asserted rather than assumed.
+      - name: Check the shell scripts
+        run: |
+          sh -n install.sh
+          sh -n agent/bin/aipanel-shell
+          shellcheck --shell=sh install.sh agent/bin/aipanel-shell
+
+      - name: Verify the restricted shell's allowlist still holds
+        run: |
+          set -e
+          assert_denied() {
+            if SSH_ORIGINAL_COMMAND="$1" sh agent/bin/aipanel-shell >/dev/null 2>&1; then
+              echo "SECURITY: '$1' was permitted by the restricted shell"; exit 1
+            fi
+          }
+          assert_allowed() {
+            if ! SSH_ORIGINAL_COMMAND="$1" sh agent/bin/aipanel-shell >/dev/null 2>&1; then
+              echo "'$1' should be permitted but was denied"; exit 1
+            fi
+          }
+          assert_allowed "git status"
+          assert_denied "nc -l 1234"
+          assert_denied "cat /etc/shadow; id"
+          assert_denied "ls \$(whoami)"
+          assert_denied "/usr/bin/nc -l 1234"
+          echo "restricted shell allowlist holds"
+
+  schema:
+    name: Schema
+    runs-on: ubuntu-latest
+    container: php:8.3-cli
+
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: root
+          MYSQL_DATABASE: aipanel
+        options: >-
+          --health-cmd="mysqladmin ping -h localhost -uroot -proot"
+          --health-interval=5s --health-timeout=5s --health-retries=20
+
+    steps:
+      - name: Install toolchain
+        run: |
+          apt-get update -qq
+          apt-get install -y -qq --no-install-recommends git unzip
+          docker-php-ext-install pdo_mysql
+          curl -sS https://getcomposer.org/installer | php -- \
+            --install-dir=/usr/local/bin --filename=composer
+
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: composer install --no-interaction --prefer-dist --no-progress
+
+      # Migrations run against a real MySQL: a broken constraint, or a column a
+      # later migration depends on, fails here rather than on someone's server.
+      # The service is reachable by its label from inside the job container.
+      - name: Apply migrations
+        env:
+          APP_ENV: ci
+          DB_DSN: mysql:host=mysql;port=3306;dbname=aipanel;charset=utf8mb4
+          DB_USER: root
+          DB_PASS: root
+          REDIS_DSN: ''
+        run: |
+          export APP_KEY="$(php -r 'echo base64_encode(random_bytes(32));')"
+          php bin/console.php migrate
+
+      - name: Migrations are idempotent
+        env:
+          APP_ENV: ci
+          DB_DSN: mysql:host=mysql;port=3306;dbname=aipanel;charset=utf8mb4
+          DB_USER: root
+          DB_PASS: root
+          REDIS_DSN: ''
+        run: |
+          export APP_KEY="$(php -r 'echo base64_encode(random_bytes(32));')"
+          output="$(php bin/console.php migrate)"
+          echo "$output"
+          echo "$output" | grep -q 'Nothing to migrate' \
+            || { echo 'Re-running migrations was not a no-op'; exit 1; }

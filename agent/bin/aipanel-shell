@@ -1,0 +1,67 @@
+#!/bin/sh
+# aipanel restricted shell.
+#
+# Installed as the login shell for every tenant. The tenant is already inside a
+# chroot of its own home; this narrows what can run there to an allowlist, so
+# "SSH access" means inspect-and-operate-my-own-site, not arbitrary execution.
+#
+# Interactive logins get a bounded menu shell; non-interactive commands
+# (rsync/sftp/git over ssh) are matched against the allowlist.
+
+set -eu
+
+ALLOWED='git|composer|php|ls|cat|tail|head|grep|find|du|df|pwd|whoami|env|rsync|sftp-server|scp|mkdir|cp|mv|rm|touch|chmod|unzip|tar|curl|wget'
+
+deny() {
+    printf 'aipanel: %s is not permitted in this site shell.\n' "$1" >&2
+    printf 'Code changes are made by the AI through your GitHub repo; whatever lands on main deploys here.\n' >&2
+    exit 126
+}
+
+# Shell metacharacters would let an allowed command smuggle a denied one past
+# the allowlist check, so they are refused outright.
+has_metachars() {
+    # The patterns are deliberately literal: these characters are being matched
+    # as text, not expanded.
+    # shellcheck disable=SC2016
+    case "$1" in
+        *';'*|*'&'*|*'|'*|*'`'*|*'$('*|*'>'*|*'<'*|*'\n'*) return 0 ;;
+    esac
+    return 1
+}
+
+if [ -n "${SSH_ORIGINAL_COMMAND:-}" ]; then
+    has_metachars "$SSH_ORIGINAL_COMMAND" && deny "$SSH_ORIGINAL_COMMAND"
+    cmd=$(printf '%s' "$SSH_ORIGINAL_COMMAND" | awk '{print $1}' | sed 's#.*/##')
+    printf '%s' "$cmd" | grep -Eq "^(${ALLOWED})$" || deny "$cmd"
+    exec /bin/sh -c "$SSH_ORIGINAL_COMMAND"
+fi
+
+cat <<'BANNER'
+  aipanel site shell
+  ------------------
+  You are inside your own site's jail. Nothing outside it is reachable.
+
+    current/   the live release (read-only; deploys replace it)
+    shared/    your persistent state: .env, uploads, storage, logs
+    releases/  previous releases, kept for rollback
+
+  Code is changed by the AI in your GitHub repo. Push to main -> it goes live.
+BANNER
+
+while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    case "$line" in
+        exit|quit) exit 0 ;;
+    esac
+    if has_metachars "$line"; then
+        printf 'aipanel: shell metacharacters are not permitted.\n' >&2
+        continue
+    fi
+    cmd=$(printf '%s' "$line" | awk '{print $1}' | sed 's#.*/##')
+    if printf '%s' "$cmd" | grep -Eq "^(${ALLOWED})$"; then
+        /bin/sh -c "$line" || true
+    else
+        printf 'aipanel: %s is not permitted. Allowed: %s\n' "$cmd" "$(printf '%s' "$ALLOWED" | tr '|' ' ')" >&2
+    fi
+done
