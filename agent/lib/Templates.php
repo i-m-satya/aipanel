@@ -17,7 +17,21 @@ final class Templates
         }
 
         $content = (string) file_get_contents($path);
+
+        // A template may carry a whole optional block — the HTTPS server block
+        // before a certificate exists, for instance. An empty value for the
+        // marker removes the block that encloses it rather than leaving a
+        // server{} with no listen directive behind.
         foreach ($vars as $key => $value) {
+            if ($value === '' && preg_match('/\n*server \{[^{}]*\{\{' . preg_quote($key, '/') . '\}\}.*?\n\}\n/s', $content) === 1) {
+                $content = (string) preg_replace(
+                    '/\n*server \{[^{}]*\{\{' . preg_quote($key, '/') . '\}\}.*?\n\}\n/s',
+                    "\n",
+                    $content
+                );
+                continue;
+            }
+
             $content = str_replace('{{' . $key . '}}', $value, $content);
         }
 

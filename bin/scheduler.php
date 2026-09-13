@@ -75,7 +75,37 @@ do {
         }
     }
 
-    // 3. Report sites whose live release is behind their deploy branch.
+    // 3. Certificate sweep. Every domain aipanel manages gets Let's Encrypt
+    //    automatically, so renewal is not something anyone has to remember:
+    //    ssl.issue is idempotent and certbot leaves a certificate that is not
+    //    yet due alone, so re-queueing daily costs nothing and closes the gap
+    //    when a domain's DNS finally points here.
+    if ($tick % 120 === 0) {
+        foreach ($db->select(
+            "SELECT id, domain, site_user, document_root, node_id, account_id
+             FROM sites
+             WHERE status = 'active'
+               AND (ssl_status <> 'active' OR ssl_renewed_at IS NULL OR ssl_renewed_at < DATE_SUB(NOW(), INTERVAL 30 DAY))"
+        ) as $site) {
+            try {
+                $queue->enqueue(
+                    task: 'ssl.issue',
+                    nodeId: (int) $site['node_id'],
+                    params: [
+                        'domain' => (string) $site['domain'],
+                        'site_user' => (string) $site['site_user'],
+                        'document_root' => (string) $site['document_root'],
+                    ],
+                    accountId: (int) $site['account_id'],
+                    priority: 210,
+                );
+            } catch (Throwable $e) {
+                fwrite(STDERR, '[scheduler] certificate sweep: ' . $e->getMessage() . "\n");
+            }
+        }
+    }
+
+    // 4. Report sites whose live release is behind their deploy branch.
     if ($tick % 10 === 0) {
         foreach ($deploys->detectDrift() as $drift) {
             fwrite(STDOUT, sprintf(

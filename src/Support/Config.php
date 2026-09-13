@@ -36,11 +36,6 @@ final class Config
                 'sleep_ms' => (int) Env::get('WORKER_SLEEP_MS', 500),
                 'node_max_concurrency' => (int) Env::get('NODE_MAX_CONCURRENCY', 4),
             ],
-            'assistant' => [
-                'enabled' => (bool) Env::get('ASSISTANT_ENABLED', false),
-                'api_key' => (string) Env::get('ANTHROPIC_API_KEY', ''),
-                'model' => (string) Env::get('ANTHROPIC_MODEL', 'claude-opus-5'),
-            ],
         ]);
     }
 

@@ -90,6 +90,50 @@ final class GitHubApp
         ], $this->installationToken($installationId));
     }
 
+    /**
+     * Merge one branch into another — how "make it live" promotes sandbox to
+     * main. GitHub performs the merge, so the resulting push fires the webhook
+     * and production deploys through the ordinary path.
+     *
+     * @return array{state:string,sha:?string,detail:string}
+     */
+    public function mergeBranch(
+        int $installationId,
+        string $repo,
+        string $base,
+        string $head,
+        string $message,
+    ): array {
+        try {
+            $response = $this->request('POST', "/repos/{$repo}/merges", [
+                'base' => $base,
+                'head' => $head,
+                'commit_message' => $message,
+            ], $this->installationToken($installationId));
+        } catch (GitHubException $e) {
+            // 204 = already up to date, 409 = merge conflict. Both are ordinary
+            // outcomes of promoting, not failures to report as errors.
+            if (str_contains($e->getMessage(), 'HTTP 204')) {
+                return ['state' => 'up_to_date', 'sha' => null, 'detail' => 'Production already has these changes.'];
+            }
+            if (str_contains($e->getMessage(), 'HTTP 409')) {
+                return [
+                    'state' => 'conflict',
+                    'sha' => null,
+                    'detail' => 'Sandbox conflicts with production; resolve it in the repository first.',
+                ];
+            }
+
+            throw $e;
+        }
+
+        return [
+            'state' => 'merged',
+            'sha' => isset($response['sha']) ? (string) $response['sha'] : null,
+            'detail' => (string) ($response['commit']['message'] ?? 'merged'),
+        ];
+    }
+
     /** @return array<string,mixed> */
     public function createPullRequest(
         int $installationId,
@@ -182,6 +226,10 @@ final class GitHubApp
         }
 
         $decoded = json_decode((string) $raw, true);
+        if ($status === 204) {
+            throw new GitHubException("GitHub {$method} {$path} returned HTTP 204 (nothing to do).");
+        }
+
         if ($status >= 400) {
             throw new GitHubException(sprintf(
                 'GitHub %s %s failed (HTTP %d): %s',

@@ -7,10 +7,9 @@ namespace AIPanel\Tasks;
 /**
  * Validates a task invocation against the catalogue before it can be queued.
  *
- * This is the choke point that makes assistant-proposed work safe: the LLM
- * produces task names and parameters, and anything that is not in the
- * catalogue, has the wrong shape, or targets a node with the wrong role is
- * rejected here rather than reaching an agent.
+ * Nothing reaches a node agent without passing through here: a task that is
+ * not in the catalogue, has the wrong shape, or targets a node with the wrong
+ * role is rejected before it can be queued.
  */
 final class TaskValidator
 {

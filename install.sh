@@ -17,6 +17,9 @@
 # and prints the URL to finish setup in the browser. The first GitHub account
 # to sign in becomes the administrator.
 #
+# The ACME webroot is created here so that Let's Encrypt challenges for every
+# domain the panel manages are served from one place.
+#
 # Supported: Debian/Ubuntu (apt), RHEL/Rocky/Alma/Fedora (dnf), Alpine (apk).
 
 set -eu
@@ -118,14 +121,14 @@ case "$PM" in
         apt-get install -y -qq --no-install-recommends \
             git curl unzip ca-certificates \
             php-cli php-mysql php-curl php-mbstring php-xml php-zip \
-            mariadb-server nginx openssh-client
+            mariadb-server nginx openssh-client certbot
         DB_SERVICE=mariadb
         ;;
     dnf)
         dnf install -y -q \
             git curl unzip \
             php-cli php-mysqlnd php-curl php-mbstring php-xml \
-            mariadb-server nginx openssh-clients
+            mariadb-server nginx openssh-clients certbot
         DB_SERVICE=mariadb
         ;;
     apk)
@@ -133,7 +136,7 @@ case "$PM" in
             git curl unzip \
             php83-cli php83-pdo_mysql php83-curl php83-mbstring php83-openssl \
             php83-session php83-tokenizer php83-fileinfo php83-phar php83-dom \
-            mariadb mariadb-client nginx openssh-client
+            mariadb mariadb-client nginx openssh-client certbot
         DB_SERVICE=mariadb
         ;;
 esac
@@ -208,6 +211,11 @@ id -u "$RUN_USER" >/dev/null 2>&1 || \
 # The 'sites' group is what the sshd jail rule matches on; tenant users are
 # added to it as websites are created.
 getent group sites >/dev/null 2>&1 || groupadd sites 2>/dev/null || addgroup sites 2>/dev/null || true
+
+# Shared ACME challenge webroot: every managed domain answers Let's Encrypt
+# from here, so certificates are issued and renewed without per-site setup.
+mkdir -p /var/www/acme
+chmod 755 /var/www/acme
 
 cd "$INSTALL_DIR"
 composer install --no-interaction --no-dev --prefer-dist --no-progress --quiet
@@ -297,7 +305,7 @@ PrivateTmp=yes
 WantedBy=multi-user.target
 UNIT
 
-    # Ops jobs: talks to node agents. Safe to run several.
+    # Provisioning, deploys and certificates. Safe to run several.
     cat > /etc/systemd/system/aipanel-worker.service <<UNIT
 [Unit]
 Description=aipanel worker
@@ -314,26 +322,6 @@ RestartSec=2
 KillSignal=SIGTERM
 TimeoutStopSec=120
 NoNewPrivileges=yes
-
-[Install]
-WantedBy=multi-user.target
-UNIT
-
-    # AI code jobs: clones repos into throwaway sandboxes and opens PRs.
-    cat > /etc/systemd/system/aipanel-code-worker.service <<UNIT
-[Unit]
-Description=aipanel code worker
-After=network.target ${DB_SERVICE}.service
-
-[Service]
-Type=simple
-User=${RUN_USER}
-WorkingDirectory=${INSTALL_DIR}
-ExecStart=${PHP_BIN} ${INSTALL_DIR}/bin/code-worker.php
-Restart=always
-RestartSec=5
-NoNewPrivileges=yes
-PrivateTmp=yes
 
 [Install]
 WantedBy=multi-user.target
@@ -359,7 +347,7 @@ UNIT
 
     systemctl daemon-reload
     systemctl enable --now aipanel.service aipanel-worker.service \
-        aipanel-code-worker.service aipanel-scheduler.service >/dev/null 2>&1
+        aipanel-scheduler.service >/dev/null 2>&1
 else
     cat > /etc/init.d/aipanel <<RC
 #!/sbin/openrc-run

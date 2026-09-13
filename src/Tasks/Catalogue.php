@@ -5,10 +5,11 @@ declare(strict_types=1);
 namespace AIPanel\Tasks;
 
 /**
- * The single contract shared by the UI, the HTTP API and the AI assistant.
+ * The single contract shared by the UI, the HTTP API and the job queue.
  *
- * Nothing may run against a node unless it appears here. Adding a capability
- * means one entry here plus one handler in agent/tasks/.
+ * Nothing may run against a node unless it appears here, with typed parameters
+ * and a required node role. Adding a capability means one entry here plus one
+ * handler in the node agent.
  */
 final class Catalogue
 {
@@ -112,9 +113,11 @@ final class Catalogue
         'ssl.issue' => [
             'role' => 'web',
             'destructive' => false,
-            'description' => 'Issue or renew an ACME certificate for a site and reload the web server.',
+            'description' => "Issue or renew a Let's Encrypt certificate for a domain, switch its vhost to HTTPS and reload nginx. Idempotent: a certificate that is not yet due for renewal is left alone.",
             'params' => [
                 'domain' => ['type' => 'string', 'required' => true, 'description' => 'Domain to issue for.'],
+                'site_user' => ['type' => 'string', 'required' => true, 'pattern' => '/^site_[a-z0-9]{6,12}$/', 'description' => 'Tenant that owns the domain.'],
+                'document_root' => ['type' => 'string', 'required' => false, 'pattern' => '#^[a-zA-Z0-9_./-]{1,64}$#', 'description' => 'Web root relative to the release directory.'],
                 'email' => ['type' => 'string', 'required' => false, 'description' => 'ACME account contact address.'],
             ],
         ],

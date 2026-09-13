@@ -1,7 +1,10 @@
 <?php use AIPanel\Http\View; $title = 'Dashboard — aipanel'; require __DIR__ . '/layout/header.php'; ?>
 
 <h1>Dashboard</h1>
-<p class="sub">Every website is its own tenant: jailed user, own repo, AI-authored changes, main deploys live.</p>
+<p class="sub">
+  Push to <code>sandbox</code> to preview, promote to go live. Every domain gets
+  Let's Encrypt automatically.
+</p>
 
 <h2>Sites</h2>
 <div class="card">
@@ -24,21 +27,21 @@
   <?php endif; ?>
 </div>
 
-<h2>Recent AI change requests</h2>
+<h2>Recent promotions</h2>
 <div class="card">
-  <?php if ($changes === []): ?>
-    <p class="empty">No change requests yet.</p>
+  <?php if ($promotions === []): ?>
+    <p class="empty">Nothing promoted to production yet.</p>
   <?php else: ?>
   <table>
-    <tr><th>Site</th><th>Request</th><th>State</th><th>Pull request</th></tr>
-    <?php foreach ($changes as $change): ?>
+    <tr><th>Website</th><th>Promoted</th><th>State</th><th>When</th></tr>
+    <?php foreach ($promotions as $promotion): ?>
     <tr>
-      <td><?= View::e($change['domain']) ?></td>
-      <td><?= View::e(mb_strimwidth((string) $change['instruction'], 0, 90, '…')) ?></td>
-      <td><span class="pill <?= View::e($change['state']) ?>"><?= View::e($change['state']) ?></span></td>
-      <td><?php if (!empty($change['pull_request_url'])): ?>
-            <a href="<?= View::e($change['pull_request_url']) ?>" rel="noopener">open</a>
-          <?php else: ?><span class="muted">—</span><?php endif; ?></td>
+      <td><?= View::e($promotion['domain']) ?></td>
+      <td class="mono"><?= View::e(substr((string) $promotion['from_commit'], 0, 8)) ?>
+          → <?= View::e($promotion['to_branch']) ?></td>
+      <td><span class="pill <?= View::e($promotion['state'] === 'merged' ? 'live' : 'failed') ?>">
+          <?= View::e($promotion['state']) ?></span></td>
+      <td class="muted"><?= View::e($promotion['created_at']) ?></td>
     </tr>
     <?php endforeach; ?>
   </table>

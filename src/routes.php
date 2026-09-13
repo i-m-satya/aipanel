@@ -2,7 +2,6 @@
 
 declare(strict_types=1);
 
-use AIPanel\Http\Controllers\AssistantController;
 use AIPanel\Http\Controllers\AuthController;
 use AIPanel\Http\Controllers\DashboardController;
 use AIPanel\Http\Controllers\SiteController;
@@ -33,14 +32,9 @@ $routes = static function (Router $router) use ($auth, $authed): Router {
     $router->get('/sites/{id}', [SiteController::class, 'show'], $auth);
     $router->post('/sites/{id}/deploy', [SiteController::class, 'deploy'], $authed);
     $router->post('/sites/{id}/rollback', [SiteController::class, 'rollback'], $authed);
+    // "Make it live": merge sandbox into the production branch.
+    $router->post('/sites/{id}/promote', [SiteController::class, 'promote'], $authed);
     $router->post('/sites/{id}/ssh-keys', [SiteController::class, 'addSshKey'], $authed);
-    $router->post('/sites/{id}/changes', [AssistantController::class, 'requestChange'], $authed);
-
-    // AI
-    $router->get('/assistant', [AssistantController::class, 'page'], $auth);
-    $router->post('/assistant/chat', [AssistantController::class, 'chat'], $authed);
-    $router->post('/assistant/plans/{plan_id}/approve', [AssistantController::class, 'approvePlan'], $authed);
-    $router->post('/assistant/plans/{plan_id}/reject', [AssistantController::class, 'rejectPlan'], $authed);
 
     return $router;
 };

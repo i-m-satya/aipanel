@@ -129,12 +129,18 @@ final class Handlers
         foreach ((array) ($params['aliases'] ?? []) as $alias) {
             $aliases[] = self::domain(['domain' => $alias]);
         }
+        // Plain HTTP to begin with: the certificate cannot be issued until the
+        // domain resolves here and can answer an ACME challenge. ssl.issue
+        // re-renders this same template with TLS on.
         $vhost = Templates::render('nginx-vhost.conf.tpl', [
             'domain' => $domain,
             'server_names' => implode(' ', [$domain, ...$aliases]),
             'user' => $user,
             'root' => "{$home}/current/{$docRoot}",
             'fpm_socket' => "/run/php/{$user}.sock",
+            'acme_webroot' => (string) $config['acme_webroot'],
+            'tls' => '',
+            'http_body' => '',
         ]);
         $changed = Templates::writeIfChanged("{$config['vhost_dir']}/{$domain}.conf", $vhost, $dryRun) || $changed;
 
@@ -443,28 +449,112 @@ final class Handlers
 
     // ------------------------------------------------------------------ ssl
 
-    /** @param array<string,mixed> $params @param array<string,mixed> $config */
+    /**
+     * Issue or renew a Let's Encrypt certificate, then switch the domain's
+     * vhost to HTTPS.
+     *
+     * Uses the webroot challenge against one shared ACME directory rather than
+     * certbot's nginx plugin: the plugin rewrites the vhost in place, which the
+     * next provisioning task would overwrite, silently dropping TLS. Here the
+     * vhost is re-rendered from the template with TLS turned on, so it survives
+     * every later task run.
+     *
+     * Idempotent: certbot leaves a certificate that is not due for renewal
+     * alone, and re-rendering an unchanged vhost reports changed:false.
+     *
+     * @param array<string,mixed> $params @param array<string,mixed> $config
+     */
     public static function sslIssue(array $params, array $config): array
     {
         $domain = self::domain($params);
-        $email = isset($params['email']) ? filter_var((string) $params['email'], FILTER_VALIDATE_EMAIL) : false;
+        $user = self::siteUser($params);
+        $docRoot = self::relativePath((string) ($params['document_root'] ?? 'public'));
+        $home = self::home($config, $user);
         $dryRun = (bool) $config['dry_run'];
 
-        $argv = [
-            (string) $config['acme_client'], 'certonly', '--nginx',
-            '--non-interactive', '--agree-tos', '--domain', $domain,
-        ];
-        $argv = $email === false ? [...$argv, '--register-unsafely-without-email'] : [...$argv, '--email', $email];
+        $acmeRoot = (string) $config['acme_webroot'];
+        if (!is_dir($acmeRoot) && !$dryRun && !mkdir($acmeRoot, 0o755, true) && !is_dir($acmeRoot)) {
+            throw new RuntimeException("Cannot create ACME webroot {$acmeRoot}");
+        }
 
-        $result = Exec::mustRun($argv, $dryRun);
+        $email = isset($params['email']) ? filter_var((string) $params['email'], FILTER_VALIDATE_EMAIL) : false;
+
+        $argv = [
+            (string) $config['acme_client'], 'certonly',
+            '--webroot', '--webroot-path', $acmeRoot,
+            '--non-interactive', '--agree-tos', '--keep-until-expiring',
+            '--domain', $domain,
+            '--cert-name', $domain,
+        ];
+        $argv = $email === false
+            ? [...$argv, '--register-unsafely-without-email']
+            : [...$argv, '--email', $email];
+
+        $result = Exec::run($argv, $dryRun);
+
+        if ($result['code'] !== 0) {
+            // A domain that does not resolve here yet is the common case on a
+            // brand new site; say so plainly so the job's error is actionable.
+            throw new RuntimeException(sprintf(
+                "Could not issue a certificate for %s. Check that its DNS A record points at this node and port 80 is reachable.\n%s",
+                $domain,
+                trim($result['stderr']) !== '' ? trim($result['stderr']) : trim($result['stdout'])
+            ));
+        }
+
+        $certDir = "/etc/letsencrypt/live/{$domain}";
+        if (!$dryRun && !is_dir($certDir)) {
+            throw new RuntimeException("certbot reported success but {$certDir} is missing.");
+        }
+
+        // Re-render the vhost with TLS on. The template carries both the HTTP
+        // redirect and the HTTPS server block.
+        $vhost = Templates::render('nginx-vhost.conf.tpl', [
+            'domain' => $domain,
+            'server_names' => $domain,
+            'user' => $user,
+            'root' => "{$home}/current/{$docRoot}",
+            'fpm_socket' => "/run/php/{$user}.sock",
+            'acme_webroot' => $acmeRoot,
+            'tls' => self::tlsBlock($domain),
+            'http_body' => self::redirectToHttps(),
+        ]);
+
+        $changed = Templates::writeIfChanged("{$config['vhost_dir']}/{$domain}.conf", $vhost, $dryRun);
+
+        Exec::mustRun(['/usr/sbin/nginx', '-t'], $dryRun);
         Exec::mustRun(['/bin/systemctl', 'reload', 'nginx'], $dryRun);
 
         return [
-            'changed' => !str_contains($result['stdout'], 'not yet due for renewal'),
+            'changed' => $changed || !str_contains($result['stdout'], 'not yet due for renewal'),
             'stdout' => $result['stdout'],
             'stderr' => $result['stderr'],
-            'facts' => [],
+            'facts' => ['domain' => $domain, 'certificate' => $certDir],
         ];
+    }
+
+    /** The HTTPS server block, once a certificate exists for the domain. */
+    private static function tlsBlock(string $domain): string
+    {
+        return <<<NGINX
+            listen 443 ssl;
+            listen [::]:443 ssl;
+            http2 on;
+
+            ssl_certificate     /etc/letsencrypt/live/{$domain}/fullchain.pem;
+            ssl_certificate_key /etc/letsencrypt/live/{$domain}/privkey.pem;
+            ssl_protocols TLSv1.2 TLSv1.3;
+            ssl_prefer_server_ciphers off;
+            ssl_session_cache shared:SSL:10m;
+            ssl_session_timeout 1d;
+
+            add_header Strict-Transport-Security "max-age=31536000" always;
+            NGINX;
+    }
+
+    private static function redirectToHttps(): string
+    {
+        return 'return 301 https://$host$request_uri;';
     }
 
     // ------------------------------------------------------------- database

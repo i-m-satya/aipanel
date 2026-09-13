@@ -21,7 +21,8 @@ services:
       - .:/app
     depends_on: [ app ]
 
-  # Ops jobs: talks to node agents over HMAC-signed HTTPS.
+  # Provisioning, deploys and certificates: talks to node agents over
+  # HMAC-signed HTTPS.
   worker:
     build: { context: ., dockerfile: docker/php/Dockerfile }
     command: php bin/worker.php
@@ -30,15 +31,6 @@ services:
       db: { condition: service_healthy }
     deploy:
       replicas: 2
-
-  # AI code jobs: clones repos into throwaway sandboxes and opens PRs.
-  # Deliberately a separate pool — it never touches a web node.
-  code-worker:
-    build: { context: ., dockerfile: docker/php/Dockerfile }
-    command: php bin/code-worker.php
-    env_file: .env
-    depends_on:
-      db: { condition: service_healthy }
 
   # Leader-elected: safe to run more than one, only one does the work.
   scheduler:
