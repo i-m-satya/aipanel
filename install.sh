@@ -5,12 +5,13 @@
 #   curl -fsSL https://raw.githubusercontent.com/i-m-satya/aipanel/main/install.sh | sh
 #   curl -fsSL .../install.sh | sh -s -- --port 2087
 #
-# Installing from a private fork needs a GitHub token with read access to it,
-# since both fetching this script and cloning the panel are authenticated then:
+# Installing from a fork (private or not) needs the fork's URL as well, because
+# this script clones AIPANEL_REPO rather than wherever it was downloaded from:
 #
 #   curl -fsSL -H "Authorization: Bearer $GH_TOKEN" \
-#     https://raw.githubusercontent.com/i-m-satya/aipanel/main/install.sh \
-#     | sudo AIPANEL_TOKEN="$GH_TOKEN" sh
+#     https://raw.githubusercontent.com/<owner>/<repo>/main/install.sh \
+#     | sudo AIPANEL_TOKEN="$GH_TOKEN" \
+#            AIPANEL_REPO="https://github.com/<owner>/<repo>.git" sh
 #
 # Installs the panel and its dependencies on a Linux server, provisions the
 # database, writes systemd units for the web, worker and scheduler processes,
@@ -24,7 +25,8 @@
 
 set -eu
 
-REPO_URL="${AIPANEL_REPO:-https://github.com/i-m-satya/aipanel.git}"
+DEFAULT_REPO_URL="https://github.com/i-m-satya/aipanel.git"
+REPO_URL="${AIPANEL_REPO:-$DEFAULT_REPO_URL}"
 BRANCH="${AIPANEL_BRANCH:-main}"
 INSTALL_DIR="${AIPANEL_DIR:-/opt/aipanel}"
 PORT="${AIPANEL_PORT:-2087}"
@@ -46,14 +48,18 @@ aipanel installer
 
   --port <n>      port the panel listens on (default: ${PORT})
   --dir <path>    install directory (default: ${INSTALL_DIR})
+  --repo <url>    repository to install from (default: ${REPO_URL})
   --branch <ref>  branch or tag to install (default: ${BRANCH})
   --token <tok>   GitHub token, for installing from a private fork
   --yes           do not prompt; accept defaults
   --help          show this message
 
-Environment equivalents: AIPANEL_PORT, AIPANEL_DIR, AIPANEL_BRANCH, AIPANEL_YES,
-AIPANEL_TOKEN. Prefer the environment variable for the token: an argument is
-visible to anyone who can read the process list.
+Environment equivalents: AIPANEL_PORT, AIPANEL_DIR, AIPANEL_BRANCH, AIPANEL_REPO,
+AIPANEL_YES, AIPANEL_TOKEN. Prefer the environment variable for the token: an
+argument is visible to anyone who can read the process list.
+
+Note that downloading this script from a fork does not by itself install that
+fork — pass --repo (or AIPANEL_REPO) with the fork's clone URL.
 USAGE
 }
 
@@ -63,6 +69,8 @@ while [ $# -gt 0 ]; do
         --port=*) PORT="${1#*=}"; shift ;;
         --dir)    INSTALL_DIR="${2:?--dir needs a value}"; shift 2 ;;
         --dir=*)  INSTALL_DIR="${1#*=}"; shift ;;
+        --repo)   REPO_URL="${2:?--repo needs a value}"; shift 2 ;;
+        --repo=*) REPO_URL="${1#*=}"; shift ;;
         --branch) BRANCH="${2:?--branch needs a value}"; shift 2 ;;
         --branch=*) BRANCH="${1#*=}"; shift ;;
         --token)  TOKEN="${2:?--token needs a value}"; shift 2 ;;
@@ -168,6 +176,14 @@ fi
 # --------------------------------------------------------------- code
 
 step "Installing aipanel into ${INSTALL_DIR}"
+
+if [ -n "$TOKEN" ] && [ "$REPO_URL" = "$DEFAULT_REPO_URL" ]; then
+    red "note: a token was supplied but --repo was not, so this installs the public
+      upstream repository (${DEFAULT_REPO_URL}), not a fork. If you meant to
+      install a fork, re-run with --repo <its clone URL>."
+fi
+
+green "installing from ${REPO_URL} (${BRANCH})"
 
 # A token is only needed for a private repository. It is passed to git through
 # an askpass helper rather than embedded in the remote URL, so it never lands
