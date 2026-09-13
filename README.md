@@ -49,7 +49,18 @@ website.
 
 ## Install
 
-One command on any Linux server (Debian/Ubuntu, RHEL/Rocky/Alma/Fedora, or Alpine):
+One command on any Linux server (Debian/Ubuntu, RHEL/Rocky/Alma/Fedora, or Alpine).
+
+**While this repository is private**, both fetching the script and cloning the
+panel need a GitHub token with read access to it:
+
+```bash
+curl -fsSL -H "Authorization: Bearer $GH_TOKEN" \
+  https://raw.githubusercontent.com/i-m-satya/aipanel/main/install.sh \
+  | sudo AIPANEL_TOKEN="$GH_TOKEN" sh
+```
+
+Once the repository is public, no token is involved:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/i-m-satya/aipanel/main/install.sh | sudo sh
