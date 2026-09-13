@@ -66,21 +66,19 @@ environments are provisioned, both get certificates, and every push deploys.
 
 ## Install
 
-One command on any Linux server (Debian/Ubuntu, RHEL/Rocky/Alma/Fedora, or Alpine).
-
-**While this repository is private**, both fetching the script and cloning the
-panel need a GitHub token with read access to it:
-
-```bash
-curl -fsSL -H "Authorization: Bearer $GH_TOKEN" \
-  https://raw.githubusercontent.com/i-m-satya/aipanel/main/install.sh \
-  | sudo AIPANEL_TOKEN="$GH_TOKEN" sh
-```
-
-Once the repository is public, no token is involved:
+One command on any Linux server (Debian/Ubuntu, RHEL/Rocky/Alma/Fedora, or Alpine):
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/i-m-satya/aipanel/main/install.sh | sudo sh
+```
+
+Installing from a **private** fork needs a token with read access to it, since
+both fetching the script and cloning the panel are authenticated then:
+
+```bash
+curl -fsSL -H "Authorization: Bearer $GH_TOKEN" \
+  https://raw.githubusercontent.com/<owner>/<repo>/main/install.sh \
+  | sudo AIPANEL_TOKEN="$GH_TOKEN" sh
 ```
 
 Pick the port it listens on — it prompts, or pass it non-interactively:
