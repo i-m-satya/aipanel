@@ -91,14 +91,15 @@ final class MigrationTest extends TestCase
         foreach ($files as $file) {
             $sql = (string) file_get_contents($file);
             $expected = preg_match_all('/^CREATE TABLE /m', $sql)
-                + preg_match_all('/^ALTER TABLE /m', $sql);
+                + preg_match_all('/^ALTER TABLE /m', $sql)
+                + preg_match_all('/^DROP TABLE /m', $sql);
 
             $statements = $this->split($sql);
 
             self::assertCount(
                 $expected,
                 $statements,
-                basename($file) . ' did not split into one statement per CREATE/ALTER'
+                basename($file) . ' did not split into one statement per CREATE/ALTER/DROP'
             );
 
             foreach ($statements as $statement) {

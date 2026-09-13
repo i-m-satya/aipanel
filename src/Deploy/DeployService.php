@@ -40,9 +40,9 @@ final class DeployService
 
         $jobIds = [];
         foreach ($sites as $site) {
-            // Only the site's own deploy branch triggers a release. Pushes to
-            // any other branch are recorded and ignored.
-            if ($ref !== 'refs/heads/' . (string) $site['deploy_branch']) {
+            // Each environment watches exactly one branch, which is what keeps
+            // a sandbox push from touching production and vice versa.
+            if (!self::deploysRef($site, $ref)) {
                 continue;
             }
 
@@ -55,6 +55,28 @@ final class DeployService
         }
 
         return $jobIds;
+    }
+
+    /**
+     * Does this push belong to this environment?
+     *
+     * The whole sandbox/production separation rests on this one comparison: a
+     * push to `sandbox` may only ever reach the sandbox environment, and a
+     * push to `main` only production. Tags and any other ref deploy nothing.
+     *
+     * @param array<string,mixed> $site
+     */
+    public static function deploysRef(array $site, string $ref): bool
+    {
+        $branch = trim((string) ($site['deploy_branch'] ?? ''));
+
+        if ($branch === '' || !str_starts_with($ref, 'refs/heads/')) {
+            return false;
+        }
+
+        // Exact match only: a branch named "sandbox-old" or "main-backup" must
+        // not deploy anything.
+        return $ref === 'refs/heads/' . $branch;
     }
 
     /**

@@ -80,6 +80,12 @@ final class JobRunner
                 if ($site !== null) {
                     $this->sites->setStatus((int) $site['id'], 'active');
                 }
+
+                // Every domain gets a certificate without anyone asking. It is
+                // queued rather than done inline because issuance depends on
+                // DNS pointing here, which may take a while — the job retries
+                // with backoff until it does.
+                $this->queueCertificate($params, $accountId, $nodeId);
                 break;
 
             case 'site.delete':
@@ -102,6 +108,35 @@ final class JobRunner
                     ['active', (string) $params['domain'], $accountId]
                 );
                 break;
+        }
+    }
+
+    /**
+     * Queue Let's Encrypt issuance for a freshly provisioned domain.
+     *
+     * Failures here must not fail the provisioning job that triggered them:
+     * the site is already serving over HTTP, and the certificate arrives when
+     * DNS does.
+     *
+     * @param array<string,mixed> $params
+     */
+    private function queueCertificate(array $params, int $accountId, int $nodeId): void
+    {
+        try {
+            $this->queue->enqueue(
+                task: 'ssl.issue',
+                nodeId: $nodeId,
+                params: [
+                    'domain' => (string) $params['domain'],
+                    'site_user' => (string) $params['site_user'],
+                    'document_root' => (string) ($params['document_root'] ?? 'public'),
+                ],
+                accountId: $accountId,
+                priority: 60,
+            );
+        } catch (\RuntimeException $e) {
+            error_log('[aipanel] could not queue certificate for '
+                . (string) $params['domain'] . ': ' . $e->getMessage());
         }
     }
 

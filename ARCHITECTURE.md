@@ -1,13 +1,23 @@
 # aipanel — Architecture
 
-aipanel is an AI-operated hosting control panel for classic LAMP-style servers.
-It has the cPanel shape — many websites on a fleet of servers — but one
-opinionated model at its centre:
+aipanel is a hosting control panel for classic LAMP-style servers. It has the
+cPanel shape — many websites on a fleet of servers — but one opinionated model
+at its centre:
 
-> **One website = one tenant.** Each website gets its own jailed Linux user,
-> its own GitHub repository, and its own SSH access. Nobody hand-edits code on
-> the server. The AI is the author: it changes the repo, and whatever lands on
-> `main` is what runs live.
+> **One website = one repository, two environments.** Each gets its own jailed
+> Linux user and its own SSH access. Push to `sandbox` and only
+> `sandbox.<domain>` rebuilds; promote, and `<domain>` follows. HTTPS is
+> automatic for both.
+
+The panel does not author code and runs no model. Owners work in their
+repository — with Claude Code or anything else — and aipanel's responsibility
+begins at the push and ends at a running release. That boundary is deliberate:
+the component with root on every customer's server should be as small and as
+predictable as possible, and it holds no model API key because it calls no
+model.
+
+The whole interface is three actions — install, sign in with GitHub, add a
+website. Everything after that is a consequence of pushes.
 
 ---
 
@@ -56,8 +66,8 @@ A tenant who fully owns their own PHP process still sees exactly one website.
 
 `install.sh` is a single command on a fresh Linux server: it installs PHP,
 MariaDB and the panel, generates the app key and database credentials, applies
-migrations, and registers systemd units for the four long-lived processes (web,
-ops worker, code worker, scheduler). The listening port is a parameter, because
+migrations, and registers systemd units for the three long-lived processes
+(web, worker, scheduler). The listening port is a parameter, because
 a control panel usually shares a host with something else.
 
 The panel then has no users, and says so on its login page. **The first GitHub
@@ -78,16 +88,16 @@ provider, and revoking a user there revokes them here.
    GitHub webhooks ───▶│  nginx → PHP-FPM → public/index.php      │
                        └───┬───────────────┬──────────────────┬───┘
                            │               │                  │
-                    ┌──────▼─────┐  ┌──────▼──────┐   ┌───────▼────────┐
-                    │  MySQL     │  │   Redis     │   │ Anthropic API  │
-                    │ primary +  │  │ sessions,   │   │ ops planner +  │
-                    │ replicas   │  │ cache, rate │   │ code agent     │
+                    ┌──────▼─────┐  ┌──────▼──────┐   ┌────────────────┐
+                    │  MySQL     │  │   Redis     │   │  GitHub API    │
+                    │ primary +  │  │ sessions,   │   │  (App auth)    │
+                    │ replicas   │  │ cache, rate │   │                │
                     └──────┬─────┘  └─────────────┘   └───────┬────────┘
                            │ jobs (leased)                    │
-                    ┌──────▼──────────────────────────┐  ┌─────▼────────┐
-                    │  WORKERS (N replicas)           │  │  GitHub API  │
-                    │  ops jobs + AI code jobs        │──│  (App auth)  │
-                    └──────┬──────────────────────────┘  └──────────────┘
+                    ┌──────▼──────────────────────────────────▼──────┐
+                    │  WORKERS (N replicas)                          │
+                    │  provision, deploy, certificates, backups      │
+                    └──────┬─────────────────────────────────────────┘
                            │ HTTPS + HMAC-SHA256, per-node key
         ┌──────────────────┼──────────────────┬──────────────────┐
         ▼                  ▼                  ▼                  ▼
@@ -131,17 +141,17 @@ idempotency reports itself.
 
 ---
 
-## 3. The code path: GitHub → main → live
+## 3. The code path: push → live
 
-No manual code, and no editing on the server. `current/` is a symlink to an
-immutable release directory; the tenant's writable state lives in `shared/`.
+No editing on the server. `current/` is a symlink to an immutable release
+directory; the tenant's writable state lives in `shared/`.
 
 ```
- ① AI change request ──▶ worker clones the repo into an ephemeral sandbox
-                         (never on a web node), Claude edits it, worker runs
-                         the repo's own checks, commits on a branch
- ② branch pushed ─────▶ GitHub PR (or direct to main for trusted sites)
- ③ main updated ──────▶ GitHub webhook → control plane verifies signature
+ ① owner pushes ──────▶ to `sandbox` (preview) or `main` (production),
+                         from wherever they work — aipanel is not involved
+ ② webhook ───────────▶ control plane verifies X-Hub-Signature-256
+ ③ routing ───────────▶ the branch decides which environment deploys, and
+                         only that one
  ④ deploy job ────────▶ agent on the site's node:
                           git fetch into repo.git (deploy key, read-only)
                           build a new releases/<ts>/ from that exact SHA
@@ -173,35 +183,57 @@ for an unknown repo is dropped, not investigated.
 
 ---
 
-## 4. AI layers
+## 4. Environments, promotion and TLS
 
-Two separate AI surfaces, with different privileges. Neither can run commands.
+### 4.1 Two environments, one mechanism
 
-### 4.1 Ops planner (`src/AI/Assistant.php`)
-Claude gets one tool per catalogue entry plus read-only inventory tools.
-Read-only tools execute immediately so it can look at real state; mutating
-tool calls are **captured, not run** — they become a typed `Plan`, validated
-against the catalogue (unknown task, bad param, wrong node role, or a tenant
-boundary violation ⇒ hard reject), shown to the user as a diff, and only
-enqueued on approval. Authorization is re-checked at enqueue time against the
-*user's* account, never the model's claim. A prompt-injected model can at worst
-propose a plan its user must approve, over resources that user already owns.
+A website is two site rows on the same repository, each watching one branch:
 
-### 4.2 Code agent (`src/AI/CodeAgent.php`)
-Given a change request for one site, a worker:
+| Environment | Domain | Branch |
+|---|---|---|
+| sandbox | `sandbox.example.com` | `sandbox` |
+| production | `example.com` | `main` |
 
-1. mints a scoped installation token for that one repository;
-2. clones into an **ephemeral sandbox** — a throwaway container on a build
-   node, never on a web node and never as the tenant user;
-3. lets Claude read and edit only that working tree;
-4. runs the repo's own checks (`composer test`, lint) and refuses to open a PR
-   when they fail;
-5. commits with the requesting user and the session recorded in the trailer, so
-   every line in production traces back to a request and a transcript;
-6. opens a PR, or pushes to `main` when the site is configured for it.
+They are ordinary tenants — separate Linux users, pools, homes and databases —
+so a sandbox that breaks, fills its disk or spins its CPU cannot reach the live
+site. Crucially there is **no separate sandbox delivery path**: routing is one
+comparison, `ref == refs/heads/<that environment's branch>`, so a push to
+`sandbox` can only ever reach the sandbox. The rule is exact-match, so
+`sandbox-old` and `main-backup` deploy nothing.
 
-The deploy is then driven by GitHub's webhook like any human push — the AI has
-no deploy path of its own, and no credential that reaches a web node.
+### 4.2 Promotion
+
+"Make it live" merges the sandbox branch into the production branch **through
+GitHub**, and the resulting push deploys production via the same webhook as any
+other push. The panel deliberately has no privileged "deploy to production"
+route of its own: one delivery mechanism means one thing to reason about, and
+the production history on GitHub matches what is running.
+
+Two guards: a promotion is refused when the sandbox is not currently running
+the head of its branch — promoting a commit nobody has seen run defeats the
+point of having a sandbox — and a merge conflict is reported as an ordinary
+outcome to resolve in the repository, not as an error.
+
+### 4.3 Certificates
+
+Every domain aipanel manages gets Let's Encrypt, with nothing to press:
+
+- `site.create` succeeding queues `ssl.issue` for that domain automatically;
+- issuance uses the **webroot** challenge against one shared ACME directory,
+  not certbot's nginx plugin, because the plugin rewrites the vhost in place
+  and the next provisioning task would overwrite it, silently dropping TLS;
+- the vhost is re-rendered from the template with TLS on, so it survives every
+  later task run;
+- the HTTP→HTTPS redirect lives **inside `location /`**, never at server level:
+  a server-level `return` runs in nginx's rewrite phase, before location
+  matching, and would swallow the ACME challenge — breaking every renewal;
+- the scheduler re-queues issuance daily for anything without a current
+  certificate. `ssl.issue` is idempotent and certbot leaves a certificate that
+  is not due alone, so the sweep costs nothing and closes the gap when a
+  domain's DNS finally points at the node.
+
+A new domain serves over HTTP until DNS points at the node; the job retries
+with backoff until it does.
 
 ---
 
@@ -236,7 +268,7 @@ and the assistant pick it up automatically.
 |---|---|
 | 1 host | control plane + agent on the same box |
 | 10s of sites | 2+ web replicas behind a LB, Redis sessions, 2+ workers |
-| 100s of nodes | read replicas for dashboards, build nodes for AI/deploy sandboxes, per-node concurrency caps |
+| 100s of nodes | read replicas for dashboards, per-node concurrency caps |
 | 1000s | `account_id`-sharded MySQL, one queue partition per shard, regional worker pools near their nodes |
 
 Mechanics that make those stages non-events:
@@ -262,11 +294,11 @@ Mechanics that make those stages non-events:
 - The agent runs privileged but only executes its handler map, with argv-array
   exec only.
 - GitHub App installation tokens (short-lived, per-repo); agents hold read-only
-  deploy keys.
-- Full audit log: who (user, ops plan, or code agent), which task, which
-  params, what the agent returned, which commit deployed.
-- LLM output is data, never code: schema-validated task invocations, and repo
-  edits that must survive the repo's own tests and a PR.
+  deploy keys and can fetch, never push.
+- Full audit log: who, which task, which params, what the agent returned, which
+  commit deployed, who promoted what.
+- The panel holds no model API key, because it runs no model. Its whole
+  privileged surface is the task catalogue.
 
 ---
 
@@ -282,8 +314,7 @@ src/Jobs/               leased queue, job runner
 src/Nodes/              AgentClient (HMAC transport)
 src/Tasks/              Catalogue (the contract), validator, Plan
 src/Git/                GitHub App client, webhook verification
-src/Deploy/             release planning, drift detection
-src/AI/                 ops planner + code agent
+src/Deploy/             release planning, promotion, drift detection
 agent/                  node agent, handler map, config templates
 bin/                    console (migrate, user:create, node:add), worker
 db/migrations/          SQL migrations

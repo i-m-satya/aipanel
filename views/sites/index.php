@@ -8,11 +8,12 @@
     <p class="empty">No sites yet.</p>
   <?php else: ?>
   <table>
-    <tr><th>Domain</th><th>Tenant user</th><th>Repository</th><th>PHP</th><th>Status</th></tr>
+    <tr><th>Website</th><th>Sandbox</th><th>Repository</th><th>PHP</th><th>Status</th></tr>
     <?php foreach ($sites as $site): ?>
     <tr>
-      <td><a href="/sites/<?= (int) $site['id'] ?>"><?= View::e($site['domain']) ?></a></td>
-      <td class="mono"><?= View::e($site['site_user'] ?? '') ?></td>
+      <td><a href="/sites/<?= (int) $site['id'] ?>"><?= View::e($site['domain']) ?></a>
+          <div class="muted mono" style="font-size:11px"><?= View::e($site['site_user'] ?? '') ?></div></td>
+      <td class="mono"><?= View::e($site['sandbox_domain'] ?? '—') ?></td>
       <td class="mono"><?= View::e($site['repo'] ?? '—') ?></td>
       <td class="mono"><?= View::e($site['php_version']) ?></td>
       <td><span class="pill <?= View::e($site['status']) ?>"><?= View::e($site['status']) ?></span></td>
@@ -56,10 +57,12 @@
         <input id="document_root" name="document_root" value="public">
       </div>
     </div>
-    <p style="margin-top:16px"><button class="primary" type="submit">Provision tenant</button></p>
+    <p style="margin-top:16px"><button class="primary" type="submit">Provision website</button></p>
     <p class="muted" style="font-size:12px">
-      Creates the jailed Linux user, PHP-FPM pool, vhost and release layout, and registers this
-      node's read-only deploy key on the repository. Pushing to <code>main</code> deploys.
+      Creates <strong>two</strong> isolated tenants — <code>sandbox.&lt;domain&gt;</code> tracking the
+      <code>sandbox</code> branch, and <code>&lt;domain&gt;</code> tracking <code>main</code> — each with its
+      own jailed user, PHP-FPM pool, vhost and release layout. Pushing to <code>sandbox</code> updates only
+      the sandbox; <em>Make it live</em> merges it into <code>main</code> and production follows.
     </p>
   </form>
 </div>

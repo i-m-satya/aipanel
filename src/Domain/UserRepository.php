@@ -80,10 +80,20 @@ final class UserRepository
         return $user;
     }
 
-    /** True until the first user claims this installation. */
+    /**
+     * True until the first user claims this installation.
+     *
+     * If the database cannot be reached, report the installation as claimed:
+     * the login page must not offer "sign in to become the administrator" when
+     * it cannot actually tell whether an admin already exists.
+     */
     public function isUnclaimed(): bool
     {
-        $row = $this->db->selectOne('SELECT COUNT(*) AS n FROM users');
+        try {
+            $row = $this->db->selectOne('SELECT COUNT(*) AS n FROM users');
+        } catch (\PDOException) {
+            return false;
+        }
 
         return (int) ($row['n'] ?? 0) === 0;
     }

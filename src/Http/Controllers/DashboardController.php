@@ -33,10 +33,10 @@ final class DashboardController
             // latency does not grow with the size of the fleet.
             'nodes' => $this->nodes->all(),
             'jobs' => $this->queue->recentForAccount($accountId, 15),
-            'changes' => $this->db->select(
-                'SELECT c.*, s.domain FROM change_requests c
-                 JOIN sites s ON s.id = c.site_id
-                 WHERE c.account_id = ? ORDER BY c.id DESC LIMIT 10',
+            'promotions' => $this->db->select(
+                'SELECT p.*, s.domain FROM promotions p
+                 JOIN sites s ON s.id = p.site_id
+                 WHERE p.account_id = ? ORDER BY p.id DESC LIMIT 10',
                 [$accountId]
             ),
         ];

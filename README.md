@@ -1,11 +1,15 @@
 # aipanel
 
-An AI-operated hosting control panel for LAMP-style servers. cPanel's shape,
-with one opinionated model at the centre:
+A hosting control panel that gets out of the way. Install it, sign in with
+GitHub, add a website — and from then on your repository runs the server.
 
-> **One website = one tenant.** Each site gets its own jailed Linux user, its
-> own GitHub repository and its own SSH access. Nobody hand-edits code on the
-> server — the AI is the author, and whatever lands on `main` is what runs live.
+> **One website = one repository, two environments.** Push to `sandbox` and it
+> appears at `sandbox.yoursite.com`. Press *Make it live* and it merges to
+> `main` and goes to `yoursite.com`. HTTPS is issued automatically for both.
+
+aipanel does not write your code and runs no AI on your server. You work in
+your repository — with Claude Code, or any editor — and the panel's job starts
+at the push.
 
 Full design: [ARCHITECTURE.md](ARCHITECTURE.md).
 
@@ -14,22 +18,26 @@ Full design: [ARCHITECTURE.md](ARCHITECTURE.md).
 ## How it works
 
 ```
-you ──▶ "add a contact form to shop.example.com"
-          │
-          ▼
-     code agent clones the site's repo into a throwaway sandbox,
-     edits it, runs the repo's own tests, opens a pull request
-          │
-          ▼
-     main updated ──▶ GitHub webhook ──▶ deploy job
-          │
-          ▼
-     node agent builds an immutable release from that exact SHA,
-     health-checks it, atomically repoints current/, reloads one pool
+  you + Claude Code ──▶ git push origin sandbox
+                                │
+                                ▼
+                        https://sandbox.yoursite.com      ← rebuilt automatically
+                                │
+                        "Make it live"  (one button)
+                                │
+                                ▼
+                        merge sandbox → main
+                                │
+                                ▼
+                        https://yoursite.com              ← rebuilt automatically
 ```
 
-A failed deploy never moves the symlink, so the previous release keeps serving.
-Rollback is repointing it back.
+Every deploy builds an immutable release from an exact commit, health-checks
+it, then atomically repoints `current/`. A failed build never moves the
+symlink, so the previous release keeps serving; rollback moves it back.
+
+Let's Encrypt certificates are issued for every domain — production and
+sandbox — with no button to press, and renewed on their own.
 
 ### What a tenant gets
 
@@ -44,6 +52,15 @@ Rollback is repointing it back.
 
 A tenant with full control of their own PHP process still sees exactly one
 website.
+
+### The whole panel
+
+1. **Install** — one command.
+2. **Log in with GitHub** — the first account becomes the admin.
+3. **Add a website** — domain + repository.
+
+That is the entire interface. Everything after it is automatic: both
+environments are provisioned, both get certificates, and every push deploys.
 
 ---
 
@@ -112,10 +129,24 @@ serves plain HTTP on the port you chose.
 
 ### Add a website
 
-In the panel: give a domain and a GitHub repository. aipanel provisions the
-tenant — jailed Linux user, chrooted SSH, PHP-FPM pool, vhost, release layout
-— and registers the node's read-only deploy key on the repo. From then on,
-every update to `main` builds and goes live automatically.
+Give a domain and a GitHub repository. aipanel provisions **two** isolated
+tenants — `sandbox.<domain>` tracking the `sandbox` branch and `<domain>`
+tracking `main` — each with its own jailed Linux user, chrooted SSH, PHP-FPM
+pool, vhost and release layout, and registers the node's read-only deploy key
+on the repository.
+
+From then on nothing needs doing in the panel:
+
+| You push to | What updates | HTTPS |
+|---|---|---|
+| `sandbox` | `https://sandbox.<domain>` only | issued automatically |
+| `main` | `https://<domain>` | issued automatically |
+
+*Make it live* merges `sandbox` into `main`, and production deploys through the
+same webhook as any other push — there is no second, privileged delivery path.
+
+Certificates need the domain's DNS pointing at the node. Until it does, the
+issuance job retries with backoff and the site serves over HTTP.
 
 ---
 
@@ -158,7 +189,6 @@ php bin/console.php github:install <installation_id> <account_id> <org-login>
 |---|---|---|
 | Control plane | `php -S 0.0.0.0:8080 -t public` (nginx + FPM in production) | replicas behind a LB |
 | Ops worker | `php bin/worker.php` | replicas — jobs are leased, never double-run |
-| Code worker | `php bin/code-worker.php` | replicas, on build nodes only |
 | Scheduler | `php bin/scheduler.php` | replicas — one wins the leader lease |
 
 ```bash
@@ -170,15 +200,15 @@ php bin/console.php queue:status
 
 ## Safety model, in one paragraph
 
-The AI never runs commands. The ops assistant may only emit task invocations
-from a fixed catalogue (`src/Tasks/Catalogue.php`), each schema-validated and
-role-checked before it can be queued, and a plan reaches the queue only after a
-human approves it — with authorization re-checked against *that user's*
-account. The code agent may only read and write inside a throwaway clone of one
-repository, with dependencies, `.git` and CI config off limits, and it ships
-nothing: it opens a pull request, and GitHub's webhook is what deploys. On the
-node, the agent executes a fixed handler map with argv-array exec only — there
-is no code path that builds a shell string from a parameter.
+Nothing reaches a server except a named task from a fixed catalogue
+(`src/Tasks/Catalogue.php`), schema-validated and role-checked before it can be
+queued. On the node, the agent executes a fixed handler map with argv-array
+exec only — there is no code path that builds a shell string from a parameter,
+and an unknown task name is a 400 rather than an eval. Requests to the agent
+are HMAC-signed with a per-node secret over `timestamp.nonce.body`, with a
+replay cache. Tenants are isolated from each other by user, chroot,
+`open_basedir`, database grants and a systemd slice, not by any one of them.
+The panel holds no model API key, because it runs no model.
 
 ---
 
@@ -188,9 +218,8 @@ is no code path that builds a shell string from a parameter.
 public/index.php   front controller
 src/Tasks/         the task catalogue — the contract everything shares
 src/Jobs/          leased queue + runner
-src/AI/            ops planner, code agent, sandbox
 src/Git/           GitHub App auth, webhook verification
-src/Deploy/        release planning, drift detection
+src/Deploy/        release planning, promotion, drift detection
 src/Auth/          GitHub OAuth (the only login)
 agent/             node agent, handler map, config templates, restricted shell
 db/migrations/     schema

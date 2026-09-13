@@ -2,14 +2,13 @@
 
 declare(strict_types=1);
 
-use AIPanel\AI\Assistant;
 use AIPanel\Auth\GitHubOAuth;
 use AIPanel\Deploy\DeployService;
+use AIPanel\Deploy\PromotionService;
 use AIPanel\Domain\NodeRepository;
 use AIPanel\Domain\SiteRepository;
 use AIPanel\Domain\UserRepository;
 use AIPanel\Git\GitHubApp;
-use AIPanel\Http\Controllers\AssistantController;
 use AIPanel\Http\Controllers\AuthController;
 use AIPanel\Http\Controllers\DashboardController;
 use AIPanel\Http\Controllers\SiteController;
@@ -106,12 +105,10 @@ $container->set(DeployService::class, static fn (Container $c): DeployService =>
     $c->get(GitHubApp::class),
 ));
 
-$container->set(Assistant::class, static fn (Container $c): Assistant => new Assistant(
-    new Anthropic\Client(apiKey: (string) $config->get('assistant.api_key')),
-    $c->get(NodeRepository::class),
+$container->set(PromotionService::class, static fn (Container $c): PromotionService => new PromotionService(
+    $c->get(Database::class),
     $c->get(SiteRepository::class),
-    $c->get(TaskValidator::class),
-    (string) $config->get('assistant.model', 'claude-opus-5'),
+    $c->get(GitHubApp::class),
 ));
 
 // Middleware
@@ -141,15 +138,8 @@ $container->set(SiteController::class, static fn (Container $c): SiteController 
     $c->get(NodeRepository::class),
     $c->get(JobQueue::class),
     $c->get(DeployService::class),
+    $c->get(PromotionService::class),
     $c->get(GitHubApp::class),
-    $c->get(View::class),
-));
-
-$container->set(AssistantController::class, static fn (Container $c): AssistantController => new AssistantController(
-    $c->get(Assistant::class),
-    $c->get(SiteRepository::class),
-    $c->get(JobQueue::class),
-    $c->get(Database::class),
     $c->get(View::class),
 ));
 

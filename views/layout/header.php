@@ -52,7 +52,6 @@ form.inline { display:inline; }
   <nav>
     <a href="/">Dashboard</a>
     <a href="/sites">Sites</a>
-    <a href="/assistant">Assistant</a>
     <span class="muted mono">@<?= View::e($github_login) ?></span>
     <form method="post" action="/logout" class="inline">
       <input type="hidden" name="_token" value="<?= View::e($csrf) ?>">

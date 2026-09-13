@@ -45,6 +45,7 @@ final class Agent
             'fpm_pool_dir' => '/etc/php/%s/fpm/pool.d',
             'zone_dir' => '/var/lib/bind',
             'acme_client' => '/usr/bin/certbot',
+            'acme_webroot' => '/var/www/acme',
             'dry_run' => false,
         ];
 
