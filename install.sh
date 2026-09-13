@@ -5,6 +5,13 @@
 #   curl -fsSL https://raw.githubusercontent.com/i-m-satya/aipanel/main/install.sh | sh
 #   curl -fsSL .../install.sh | sh -s -- --port 2087
 #
+# While the repository is private, both fetching this script and cloning the
+# panel need a GitHub token with read access to it:
+#
+#   curl -fsSL -H "Authorization: Bearer $GH_TOKEN" \
+#     https://raw.githubusercontent.com/i-m-satya/aipanel/main/install.sh \
+#     | sudo AIPANEL_TOKEN="$GH_TOKEN" sh
+#
 # Installs the panel and its dependencies on a Linux server, provisions the
 # database, writes systemd units for the web, worker and scheduler processes,
 # and prints the URL to finish setup in the browser. The first GitHub account
@@ -20,6 +27,7 @@ INSTALL_DIR="${AIPANEL_DIR:-/opt/aipanel}"
 PORT="${AIPANEL_PORT:-2087}"
 RUN_USER="aipanel"
 ASSUME_YES="${AIPANEL_YES:-0}"
+TOKEN="${AIPANEL_TOKEN:-}"
 
 # ---------------------------------------------------------------- output
 
@@ -36,10 +44,13 @@ aipanel installer
   --port <n>      port the panel listens on (default: ${PORT})
   --dir <path>    install directory (default: ${INSTALL_DIR})
   --branch <ref>  branch or tag to install (default: ${BRANCH})
+  --token <tok>   GitHub token, required while the repository is private
   --yes           do not prompt; accept defaults
   --help          show this message
 
-Environment equivalents: AIPANEL_PORT, AIPANEL_DIR, AIPANEL_BRANCH, AIPANEL_YES.
+Environment equivalents: AIPANEL_PORT, AIPANEL_DIR, AIPANEL_BRANCH, AIPANEL_YES,
+AIPANEL_TOKEN. Prefer the environment variable for the token: an argument is
+visible to anyone who can read the process list.
 USAGE
 }
 
@@ -51,6 +62,8 @@ while [ $# -gt 0 ]; do
         --dir=*)  INSTALL_DIR="${1#*=}"; shift ;;
         --branch) BRANCH="${2:?--branch needs a value}"; shift 2 ;;
         --branch=*) BRANCH="${1#*=}"; shift ;;
+        --token)  TOKEN="${2:?--token needs a value}"; shift 2 ;;
+        --token=*) TOKEN="${1#*=}"; shift ;;
         --yes|-y) ASSUME_YES=1; shift ;;
         --help|-h) usage; exit 0 ;;
         *) die "unknown option: $1 (try --help)" ;;
@@ -152,12 +165,40 @@ fi
 # --------------------------------------------------------------- code
 
 step "Installing aipanel into ${INSTALL_DIR}"
+
+# A token is only needed while the repository is private. It is passed to git
+# through an askpass helper rather than embedded in the remote URL, so it never
+# lands in .git/config, the reflog, or a later `git remote -v`.
+if [ -n "$TOKEN" ]; then
+    ASKPASS="$(mktemp)"
+    cat > "$ASKPASS" <<ASK
+#!/bin/sh
+case "\$1" in
+    *Username*) echo "x-access-token" ;;
+    *) echo "${TOKEN}" ;;
+esac
+ASK
+    chmod 700 "$ASKPASS"
+    export GIT_ASKPASS="$ASKPASS"
+    # Remove it however this script exits, successfully or not.
+    trap 'rm -f "$ASKPASS"' EXIT HUP INT TERM
+fi
+
+# Never let git stop on an interactive credential prompt during an unattended
+# install; a missing credential should fail with the message below instead.
+export GIT_TERMINAL_PROMPT=0
+
 if [ -d "${INSTALL_DIR}/.git" ]; then
     git -C "$INSTALL_DIR" fetch --quiet origin "$BRANCH"
     git -C "$INSTALL_DIR" checkout --quiet "$BRANCH"
     git -C "$INSTALL_DIR" reset --hard --quiet "origin/${BRANCH}"
-else
-    git clone --quiet --branch "$BRANCH" --depth 1 "$REPO_URL" "$INSTALL_DIR"
+elif ! git clone --quiet --branch "$BRANCH" --depth 1 "$REPO_URL" "$INSTALL_DIR"; then
+    if [ -z "$TOKEN" ]; then
+        die "could not clone ${REPO_URL}.
+  The repository is private, so the installer needs a GitHub token with read
+  access to it. Re-run with:  sudo AIPANEL_TOKEN=<token> sh install.sh"
+    fi
+    die "could not clone ${REPO_URL} — check that the token has read access to it"
 fi
 
 id -u "$RUN_USER" >/dev/null 2>&1 || \
