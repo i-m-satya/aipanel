@@ -12,6 +12,7 @@ declare(strict_types=1);
  *   php bin/console.php node:deploy-key <id>    generate the node's read-only deploy key
  *   php bin/console.php github:install <installation_id> <account_id> <login>
  *   php bin/console.php user:invite <github-login> [owner|user|admin]
+ *   php bin/console.php mode:shared | mode:single
  *   php bin/console.php queue:status
  */
 
@@ -206,6 +207,39 @@ try {
 
             fwrite(STDOUT, "Invited @{$login} as {$role} to account {$admin['account_id']}.\n");
             fwrite(STDOUT, "They can now sign in with GitHub.\n");
+            break;
+
+        case 'mode:shared':
+        case 'mode:single':
+            $shared = $command === 'mode:shared';
+            $db = $container->get(Database::class);
+
+            foreach ([
+                // Shared: anyone may sign up, but an untrusted account's first
+                // site waits for an operator, and tenants run in containers.
+                'signup_mode' => $shared ? 'open' : 'invite',
+                'site_approval' => $shared ? 'untrusted' : 'never',
+                'isolation' => $shared ? 'container' : 'user',
+            ] as $name => $value) {
+                $db->execute(
+                    'INSERT INTO settings (name, value, updated_at) VALUES (?, ?, NOW())
+                     ON DUPLICATE KEY UPDATE value = VALUES(value), updated_at = NOW()',
+                    [$name, $value]
+                );
+            }
+
+            // The agent reads isolation from its own config file, not the panel's.
+            if (is_file('/etc/aipanel/agent.json')) {
+                $agent = json_decode((string) file_get_contents('/etc/aipanel/agent.json'), true);
+                if (is_array($agent)) {
+                    $agent['isolation'] = $shared ? 'container' : 'user';
+                    file_put_contents('/etc/aipanel/agent.json', json_encode($agent, JSON_PRETTY_PRINT) . "\n");
+                }
+            }
+
+            fwrite(STDOUT, $shared
+                ? "Shared hosting enabled: open signup, first site per account needs approval, container isolation.\n"
+                : "Single-operator mode: invite-only signup, no approval queue, user isolation.\n");
             break;
 
         case 'queue:status':

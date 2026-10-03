@@ -13,19 +13,30 @@ use AIPanel\Http\Request;
 use AIPanel\Http\Response;
 use AIPanel\Http\View;
 use AIPanel\Infra\Database;
+use AIPanel\Support\Config;
 use AIPanel\Jobs\JobQueue;
 use AIPanel\Tasks\ValidationException;
+use AIPanel\Tenancy\AccessDeniedException;
+use AIPanel\Tenancy\DomainVerifier;
+use AIPanel\Tenancy\Quota;
+use AIPanel\Tenancy\RateLimiter;
+use AIPanel\Tenancy\RepositoryAccess;
 
 final class SiteController
 {
     public function __construct(
         private Database $db,
+        private Config $config,
         private SiteRepository $sites,
         private NodeRepository $nodes,
         private JobQueue $queue,
         private DeployService $deploys,
         private PromotionService $promotions,
         private GitHubApp $github,
+        private RepositoryAccess $repositories,
+        private DomainVerifier $domains,
+        private Quota $quota,
+        private RateLimiter $limiter,
         private View $view,
     ) {
     }
@@ -104,35 +115,77 @@ final class SiteController
         $accountId = (int) $request->param('account_id');
         $userId = (int) $request->param('user_id');
 
-        $domain = strtolower((string) $request->input('domain', ''));
-        $repo = (string) $request->input('repo', '');
+        $domain = DomainVerifier::normalise((string) $request->input('domain', ''));
+        $repo = RepositoryAccess::normalise((string) $request->input('repo', ''));
         $nodeId = (int) $request->input('node_id', '0');
         $phpVersion = (string) $request->input('php_version', '8.3');
         $documentRoot = (string) $request->input('document_root', 'public');
         $productionBranch = (string) $request->input('deploy_branch', 'main');
         $sandboxBranch = (string) $request->input('sandbox_branch', 'sandbox');
 
-        $installation = $this->db->selectOne(
-            'SELECT id FROM github_installations WHERE account_id = ? ORDER BY id LIMIT 1',
-            [$accountId]
-        );
-        if ($installation === null) {
-            return $this->error($request, 'Install the aipanel GitHub App on your organisation first.', 422);
+        // Cheap to ask for, expensive to run: rate-limit before doing any work.
+        if (!$this->limiter->attempt("site-create:{$accountId}", limit: 10, windowSeconds: 3600)) {
+            return $this->error($request, 'Too many websites created recently. Try again later.', 429);
+        }
+
+        $quota = $this->quota->canCreateSite($accountId);
+        if (!$quota['allowed']) {
+            return $this->error($request, (string) $quota['reason'], 422);
+        }
+
+        // --- Ownership, before anything is provisioned -----------------------
+        //
+        // On a shared instance these two checks are what stop one customer
+        // taking another's hostname or deploying another's repository. They run
+        // before a row is written, not after.
+
+        if (DomainVerifier::isReserved($domain, (string) $this->config->get('app.url'))) {
+            return $this->error($request, 'That hostname cannot be used here.', 422);
         }
 
         $sandboxDomain = 'sandbox.' . $domain;
 
         foreach ([$domain, $sandboxDomain] as $candidate) {
+            if ($this->domains->claimedByAnotherAccount($accountId, $candidate)) {
+                // Deliberately vague: whether another customer holds a hostname
+                // is not this customer's business.
+                return $this->error($request, "{$candidate} is not available.", 409);
+            }
             if ($this->sites->findByDomainForAccount($candidate, $accountId) !== null) {
                 return $this->error($request, "{$candidate} already exists in this account.", 422);
             }
         }
 
-        try {
-            // Fail before provisioning anything if the repo is not reachable
-            // through the customer's installation.
-            $this->github->repository((int) $installation['id'], $repo);
+        if (!$this->domains->isCovered($accountId, $domain)) {
+            $challenge = $this->domains->challenge($accountId, $domain);
 
+            return $request->wantsJson()
+                ? Response::json([
+                    'error' => 'domain_not_verified',
+                    'verify' => $challenge,
+                    'detail' => 'Publish this TXT record, then check verification and try again.',
+                ], 409)
+                : Response::html($this->view->render('sites/verify', [
+                    'challenge' => $challenge,
+                    'repo' => $repo,
+                ]), 409);
+        }
+
+        try {
+            // Which of this account's installations actually grants the repo?
+            // Asking GitHub is the only trustworthy answer.
+            $installationId = $this->repositories->installationGranting($accountId, $repo);
+        } catch (AccessDeniedException $e) {
+            return $this->error($request, $e->getMessage(), 403);
+        }
+
+        $installation = ['id' => $installationId];
+
+        // A first site from an untrusted account waits for a human, so abuse is
+        // never fully self-serve.
+        $needsApproval = $this->siteNeedsApproval($accountId);
+
+        try {
             $deployKey = $this->deployPublicKeyFor($nodeId);
 
             // Authorise this node to fetch the repository. Without it the first
@@ -164,6 +217,8 @@ final class SiteController
                     $productionUser = 'site_' . bin2hex(random_bytes(4));
                     $sandboxUser = 'site_' . bin2hex(random_bytes(4));
 
+                    $approvalState = $needsApproval ? 'pending' : 'approved';
+
                     $siteId = $this->sites->createEnvironment([
                         'account_id' => $accountId,
                         'node_id' => $nodeId,
@@ -176,6 +231,7 @@ final class SiteController
                         'deploy_branch' => $productionBranch,
                         'document_root' => $documentRoot,
                         'php_version' => $phpVersion,
+                        'approval_state' => $approvalState,
                     ]);
 
                     $sandboxId = $this->sites->createEnvironment([
@@ -190,13 +246,16 @@ final class SiteController
                         'deploy_branch' => $sandboxBranch,
                         'document_root' => $documentRoot,
                         'php_version' => $phpVersion,
+                        'approval_state' => $approvalState,
                     ]);
 
                     return [$siteId, $productionUser, $sandboxId, $sandboxUser];
                 }
             );
 
-            foreach ([[$domain, $productionUser], [$sandboxDomain, $sandboxUser]] as [$envDomain, $envUser]) {
+            // Nothing reaches a server until the site is approved. The rows
+            // exist so the customer can see what is pending.
+            foreach ($needsApproval ? [] : [[$domain, $productionUser], [$sandboxDomain, $sandboxUser]] as [$envDomain, $envUser]) {
                 $this->queue->enqueue(
                     task: 'site.create',
                     nodeId: $nodeId,
@@ -224,7 +283,7 @@ final class SiteController
                 'site_id' => $siteId,
                 'production' => ['domain' => $domain, 'site_user' => $productionUser, 'branch' => $productionBranch],
                 'sandbox' => ['id' => $sandboxId, 'domain' => $sandboxDomain, 'site_user' => $sandboxUser, 'branch' => $sandboxBranch],
-                'status' => 'provisioning',
+                'status' => $needsApproval ? 'awaiting_approval' : 'provisioning',
             ], 202)
             : Response::redirect("/sites/{$siteId}");
     }
@@ -238,9 +297,9 @@ final class SiteController
      */
     public function promote(Request $request): Response
     {
-        $site = $this->sites->findForAccount((int) $request->param('id'), (int) $request->param('account_id'));
-        if ($site === null) {
-            return Response::json(['error' => 'not_found'], 404);
+        $site = $this->actionableSite($request);
+        if ($site instanceof Response) {
+            return $site;
         }
 
         $result = $this->promotions->promote($site, (int) $request->param('user_id'));
@@ -254,12 +313,41 @@ final class SiteController
             : Response::redirect('/sites/' . (int) $site['id']);
     }
 
+    /**
+     * Fetch a site for an action, refusing one that is not approved.
+     *
+     * The approval gate has to hold on every path, not just at creation: these
+     * routes take a site id, and a pending site still has rows.
+     *
+     * @return array<string,mixed>|Response
+     */
+    private function actionableSite(Request $request): array|Response
+    {
+        $site = $this->sites->findForAccount((int) $request->param('id'), (int) $request->param('account_id'));
+
+        if ($site === null) {
+            return Response::json(['error' => 'not_found'], 404);
+        }
+
+        if (!$this->sites->isDeployable($site)) {
+            return $this->error(
+                $request,
+                $site['approval_state'] === 'pending'
+                    ? 'This website is waiting for approval.'
+                    : 'This website was not approved' . ($site['rejected_reason'] ? ': ' . $site['rejected_reason'] : '.'),
+                409
+            );
+        }
+
+        return $site;
+    }
+
     /** Deploy whatever is currently on the site's deploy branch. */
     public function deploy(Request $request): Response
     {
-        $site = $this->sites->findForAccount((int) $request->param('id'), (int) $request->param('account_id'));
-        if ($site === null) {
-            return Response::json(['error' => 'not_found'], 404);
+        $site = $this->actionableSite($request);
+        if ($site instanceof Response) {
+            return $site;
         }
 
         try {
@@ -275,9 +363,9 @@ final class SiteController
 
     public function rollback(Request $request): Response
     {
-        $site = $this->sites->findForAccount((int) $request->param('id'), (int) $request->param('account_id'));
-        if ($site === null) {
-            return Response::json(['error' => 'not_found'], 404);
+        $site = $this->actionableSite($request);
+        if ($site instanceof Response) {
+            return $site;
         }
 
         try {
@@ -301,9 +389,9 @@ final class SiteController
     /** Authorise an SSH key for one site — it can reach that site's jail only. */
     public function addSshKey(Request $request): Response
     {
-        $site = $this->sites->findForAccount((int) $request->param('id'), (int) $request->param('account_id'));
-        if ($site === null) {
-            return Response::json(['error' => 'not_found'], 404);
+        $site = $this->actionableSite($request);
+        if ($site instanceof Response) {
+            return $site;
         }
 
         $publicKey = trim((string) $request->input('public_key', ''));
@@ -356,6 +444,45 @@ final class SiteController
         }
 
         return $key;
+    }
+
+    /**
+     * Does a new site from this account need a human to approve it?
+     *
+     * Policy lives in settings so an operator can open or close the gate without
+     * a deploy: 'untrusted' (the shared-hosting default) approves nothing from an
+     * untrusted account; 'always' approves nothing from anyone; 'never' is the
+     * single-operator case.
+     */
+    private function siteNeedsApproval(int $accountId): bool
+    {
+        $row = $this->db->selectOne("SELECT value FROM settings WHERE name = 'site_approval'");
+        $policy = (string) ($row['value'] ?? 'untrusted');
+
+        return match ($policy) {
+            'never' => false,
+            'always' => true,
+            default => !$this->quota->isTrusted($accountId),
+        };
+    }
+
+    /** Re-check a domain's TXT record on demand. */
+    public function verifyDomain(Request $request): Response
+    {
+        $accountId = (int) $request->param('account_id');
+        $domain = DomainVerifier::normalise((string) $request->input('domain', ''));
+
+        // DNS lookups are cheap for us and a nuisance to resolvers: cap them.
+        if (!$this->limiter->attempt("domain-check:{$accountId}", limit: 30, windowSeconds: 600)) {
+            return Response::json(['error' => 'Too many verification attempts. Try again shortly.'], 429);
+        }
+
+        $challenge = $this->domains->challenge($accountId, $domain);
+        $result = $this->domains->check($accountId, $domain);
+
+        return $request->wantsJson()
+            ? Response::json(['verified' => $result['verified'], 'error' => $result['error'], 'verify' => $challenge])
+            : Response::redirect('/sites?verified=' . ($result['verified'] ? '1' : '0'));
     }
 
     private function error(Request $request, string $message, int $status): Response

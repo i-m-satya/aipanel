@@ -52,6 +52,7 @@ form.inline { display:inline; }
   <nav>
     <a href="/">Dashboard</a>
     <a href="/sites">Sites</a>
+    <?php if (($role ?? '') === 'admin'): ?><a href="/admin">Operator</a><?php endif; ?>
     <span class="muted mono">@<?= View::e($github_login) ?></span>
     <form method="post" action="/logout" class="inline">
       <input type="hidden" name="_token" value="<?= View::e($csrf) ?>">

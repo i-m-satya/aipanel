@@ -87,6 +87,12 @@ final class SiteRepository
         return $this->db->selectOne('SELECT * FROM sites WHERE id = ? AND account_id = ?', [$id, $accountId]);
     }
 
+    /** Only an approved site may ever be deployed to. */
+    public function isDeployable(array $site): bool
+    {
+        return ($site['approval_state'] ?? 'approved') === 'approved';
+    }
+
     public function findByDomainForAccount(string $domain, int $accountId): ?array
     {
         return $this->db->selectOne('SELECT * FROM sites WHERE domain = ? AND account_id = ?', [$domain, $accountId]);
@@ -100,8 +106,9 @@ final class SiteRepository
         $this->db->execute(
             "INSERT INTO sites
                 (account_id, node_id, domain, environment, parent_site_id, site_user, repo,
-                 github_installation_id, deploy_branch, document_root, php_version, status, created_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'provisioning', NOW())",
+                 github_installation_id, deploy_branch, document_root, php_version,
+                 approval_state, status, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'provisioning', NOW())",
             [
                 $attributes['account_id'],
                 $attributes['node_id'],
@@ -114,6 +121,7 @@ final class SiteRepository
                 $attributes['deploy_branch'],
                 $attributes['document_root'],
                 $attributes['php_version'],
+                $attributes['approval_state'] ?? 'approved',
             ]
         );
 

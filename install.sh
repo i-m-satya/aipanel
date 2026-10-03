@@ -33,6 +33,9 @@ PORT="${AIPANEL_PORT:-2087}"
 RUN_USER="aipanel"
 AGENT_PORT="${AIPANEL_AGENT_PORT:-9443}"
 ASSUME_YES="${AIPANEL_YES:-0}"
+# 'shared' hosts other people's sites: open signup, approval-gated first sites,
+# and container isolation. 'single' is one operator hosting their own.
+MODE="${AIPANEL_MODE:-single}"
 TOKEN="${AIPANEL_TOKEN:-}"
 
 # ---------------------------------------------------------------- output
@@ -50,6 +53,8 @@ aipanel installer
   --port <n>      port the panel listens on (default: ${PORT})
   --dir <path>    install directory (default: ${INSTALL_DIR})
   --repo <url>    repository to install from (default: ${REPO_URL})
+  --shared        shared hosting: open signup, site approval, container
+                  isolation per tenant (installs a container runtime)
   --branch <ref>  branch or tag to install (default: ${BRANCH})
   --token <tok>   GitHub token, for installing from a private fork
   --yes           do not prompt; accept defaults
@@ -70,6 +75,7 @@ while [ $# -gt 0 ]; do
         --port=*) PORT="${1#*=}"; shift ;;
         --dir)    INSTALL_DIR="${2:?--dir needs a value}"; shift 2 ;;
         --dir=*)  INSTALL_DIR="${1#*=}"; shift ;;
+        --shared) MODE=shared; shift ;;
         --repo)   REPO_URL="${2:?--repo needs a value}"; shift 2 ;;
         --repo=*) REPO_URL="${1#*=}"; shift ;;
         --branch) BRANCH="${2:?--branch needs a value}"; shift 2 ;;
@@ -149,6 +155,19 @@ case "$PM" in
         DB_SERVICE=mariadb
         ;;
 esac
+
+if [ "$MODE" = shared ]; then
+    step "Installing a container runtime (shared mode)"
+    case "$PM" in
+        apt) apt-get install -y -qq --no-install-recommends docker.io ;;
+        dnf) dnf install -y -q podman ;;
+        apk) apk add --no-cache docker ;;
+    esac
+
+    if command -v systemctl >/dev/null 2>&1; then
+        systemctl enable --now docker >/dev/null 2>&1 || true
+    fi
+fi
 
 PHP_BIN="$(command -v php || true)"
 [ -n "$PHP_BIN" ] || PHP_BIN="$(command -v php83 || true)"
@@ -453,6 +472,13 @@ step "Registering this host as a managed node"
 # Single-server install: this box is both the control plane and the one node it
 # manages. Without this a panel has nowhere to put a website.
 "${PHP_BIN}" "${INSTALL_DIR}/bin/console.php" node:bootstrap-local "${AGENT_PORT}"
+
+if [ "$MODE" = shared ]; then
+    step "Configuring shared hosting"
+    "${PHP_BIN}" "${INSTALL_DIR}/bin/console.php" mode:shared
+else
+    "${PHP_BIN}" "${INSTALL_DIR}/bin/console.php" mode:single
+fi
 
 # The agent config and deploy key are written by the command above as root.
 chmod 600 /etc/aipanel/agent.json /etc/aipanel/deploy_key 2>/dev/null || true

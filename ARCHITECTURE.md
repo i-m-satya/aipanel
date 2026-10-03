@@ -320,3 +320,84 @@ bin/                    console (migrate, user:create, node:add), worker
 db/migrations/          SQL migrations
 views/                  server-rendered templates
 ```
+
+---
+
+## 9. Shared hosting: many customers, one installation
+
+Running your own sites and running strangers' sites are different problems. The
+second adds three requirements the first does not have, and each is enforced
+before anything reaches a server.
+
+### 9.1 Ownership is proved, never claimed
+
+| Claim | How it is proved |
+|---|---|
+| "I control this hostname" | A TXT record at `_aipanel-challenge.<domain>` carrying a 32-byte token. Verifying an apex covers its subdomains, so `sandbox.` is free — but only under a domain that account verified. |
+| "I may deploy this repository" | The repository must be granted by *that account's own* GitHub App installation. GitHub is asked at creation time, every time, because an installation's repository selection can change. |
+
+Without the first, a customer can point any hostname at the panel — including
+someone else's — and the panel will serve it and obtain a certificate for it.
+Without the second, a customer can name any public repository and have the panel
+deploy it and register deploy keys on it. A hostname already used by another
+account is refused with a deliberately vague "not available": which hostnames
+other customers hold is not a customer's business.
+
+Reserved outright: the panel's own hostname and its subdomains (claiming it would
+let a tenant serve the login page and harvest GitHub sessions), `localhost`,
+`.internal`, `.test`, `.invalid`, `.example`, and bare IP addresses.
+
+### 9.2 Isolation is a kernel boundary, not a convention
+
+In shared mode each site runs in **its own container**:
+
+| Control | Effect |
+|---|---|
+| `--user <tenant uid>` | php-fpm never runs as root inside |
+| `--read-only` | the image filesystem is immutable; only declared mounts are writable |
+| `--cap-drop ALL`, `no-new-privileges` | no capabilities, and setuid binaries cannot elevate |
+| `--network` (per site, `--internal`) | no route to another tenant's container, nor to the host's database socket |
+| `--memory`, `--cpus`, `--pids-limit`, `ulimit` | a fork bomb or a busy loop hits a wall, not the host |
+| `current/` mounted read-only | tenant code cannot rewrite the release it is serving |
+| `shared/` mounted read-write | the state a tenant is meant to have, and nothing else |
+
+nginx stays on the host and reaches each container's php-fpm over a unix socket
+in a per-site directory, so no port is exposed and nothing is routable between
+tenants. Container and network names are *derived* from the validated site user,
+never from customer input — these names become arguments to a command running as
+root.
+
+Single-operator installs can still use `isolation: user` (Unix user + chroot +
+`open_basedir`). That is defence in depth, not a boundary: one local
+privilege-escalation bug and a tenant is on the host. It is the wrong mode for
+strangers, which is why `--shared` sets `container`.
+
+### 9.3 Abuse is bounded
+
+- **Approval gate** — an untrusted account's first site waits for an operator.
+  Policy lives in `settings.site_approval` (`untrusted` / `always` / `never`), so
+  the gate opens or closes without a deploy. A push to an unapproved site deploys
+  nothing: `approval_state = 'approved'` is part of the webhook's own query.
+- **Quotas** — sites per account and disk per account, stored on the account so a
+  paying customer can be raised without a deploy. Counted per *website*, not per
+  environment, so a customer is not charged twice for their sandbox.
+- **Rate limits** — site creation and DNS checks, in the database rather than
+  Redis so a single-server install is protected too.
+- **Suspension** — suspending an account locks its users out *and* stops its
+  sites, leaving all data in place so a mistake is reversible.
+
+### 9.4 What this does not solve
+
+Stated plainly, because "fully secure" is not a property any multi-tenant host
+can claim:
+
+- A container escape — a kernel or runtime bug — crosses the boundary. Keep the
+  host patched; this is the risk you accept by hosting strangers' code at all.
+- Tenants share the host kernel, network bandwidth and disk I/O. Cgroups bound
+  CPU, memory and PIDs; they do not make noisy-neighbour effects disappear.
+- Outbound traffic from tenant containers is not filtered by default, so a
+  compromised site can still send spam or scan the internet. A per-site egress
+  policy is the next control worth adding.
+- Nothing here inspects what a tenant actually deploys. Phishing pages and
+  miners are an abuse-handling problem, which is what the approval gate and
+  suspension are for.

@@ -63,13 +63,20 @@ final class UserRepository
             return $this->createUser($profile, $this->createAccountFor($profile['login']), 'admin', claimsInstallation: true);
         }
 
-        // Everyone else needs an invite.
+        // An invite always works, whatever the signup mode.
         $invite = $this->db->selectOne(
             'SELECT * FROM user_invites WHERE github_login = ? AND accepted_at IS NULL',
             [$profile['login']]
         );
 
         if ($invite === null) {
+            // On a shared instance signup is open: anyone may have their own
+            // account. What they cannot do is run anything without passing the
+            // site-approval and ownership checks.
+            if ($this->signupMode() === 'open') {
+                return $this->createUser($profile, $this->createAccountFor($profile['login']), 'owner');
+            }
+
             return null;
         }
 
@@ -141,9 +148,28 @@ final class UserRepository
         return (array) $this->find($userId);
     }
 
+    /** 'open' (shared instance) or 'invite' (closed). */
+    public function signupMode(): string
+    {
+        try {
+            $row = $this->db->selectOne("SELECT value FROM settings WHERE name = 'signup_mode'");
+        } catch (\PDOException) {
+            return 'invite';
+        }
+
+        return ($row['value'] ?? 'invite') === 'open' ? 'open' : 'invite';
+    }
+
     public function isActive(array $user): bool
     {
-        return ($user['status'] ?? 'active') === 'active';
+        if (($user['status'] ?? 'active') !== 'active') {
+            return false;
+        }
+
+        // A suspended account locks out its users, not just its sites.
+        $account = $this->db->selectOne('SELECT status FROM accounts WHERE id = ?', [(int) $user['account_id']]);
+
+        return ($account['status'] ?? 'active') === 'active';
     }
 
     private function createAccountFor(string $login): int
