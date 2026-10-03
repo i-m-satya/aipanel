@@ -508,6 +508,18 @@ else
     red "aipanel did not answer on port ${PORT} yet — check: journalctl -u aipanel -n 50"
 fi
 
+if [ "$MODE" = shared ]; then
+    LINK_HINT="       Customers then install that App on their own account, and the installation
+       webhook links it automatically — no command to run per customer.
+
+  Shared hosting is on: anyone may sign in with GitHub, each account's first
+  website waits for your approval at ${APP_URL}/admin, and every tenant runs in
+  its own container."
+else
+    LINK_HINT="       Install the App on your account, note the installation id from its URL, then:
+         cd ${INSTALL_DIR} && php bin/console.php github:install <installation_id> <account_id> <login>"
+fi
+
 bold "
   Installed. Two steps left, both in GitHub.
   ---------------------------------------------------------------
@@ -533,9 +545,12 @@ bold "
        Permissions:  Contents read+write, Metadata read, Pull requests read+write
        Events:       Push
 
-     Save its private key to /etc/aipanel/github-app.pem, set GITHUB_APP_ID and
-     GITHUB_APP_PRIVATE_KEY_PATH in .env, install the App on your account, then:
-       cd ${INSTALL_DIR} && php bin/console.php github:install <installation_id> <account_id> <login>
+     Save its private key to /etc/aipanel/github-app.pem, then set in .env:
+       GITHUB_APP_ID=...
+       GITHUB_APP_PRIVATE_KEY_PATH=/etc/aipanel/github-app.pem
+       GITHUB_APP_WEBHOOK_SECRET=...   (the App's webhook secret — required)
+
+${LINK_HINT}
 
   Check on things with:
     systemctl status aipanel aipanel-worker aipanel-scheduler aipanel-agent
