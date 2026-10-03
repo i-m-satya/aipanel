@@ -39,13 +39,16 @@ final class Agent
             'role' => 'web',
             'clock_skew' => 30,
             'nonce_dir' => '/var/lib/aipanel/nonces',
-            'web_root' => '/var/www',
+            'web_root' => '/srv/sites',
             'vhost_dir' => '/etc/nginx/sites-available',
             'vhost_enabled_dir' => '/etc/nginx/sites-enabled',
             'fpm_pool_dir' => '/etc/php/%s/fpm/pool.d',
             'zone_dir' => '/var/lib/bind',
             'acme_client' => '/usr/bin/certbot',
             'acme_webroot' => '/var/www/acme',
+            // One read-only key per node, root-owned: tenants must never read
+            // it, since it can fetch every repository hosted here.
+            'deploy_key' => '/etc/aipanel/deploy_key',
             'dry_run' => false,
         ];
 

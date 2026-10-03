@@ -66,41 +66,48 @@ environments are provisioned, both get certificates, and every push deploys.
 
 ## Install
 
-One command on any Linux server (Debian/Ubuntu, RHEL/Rocky/Alma/Fedora, or Alpine):
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/i-m-satya/aipanel/main/install.sh | sudo sh
-```
-
-Installing from a **fork** needs the fork's clone URL too — downloading the
-script from a fork does not by itself install that fork, because the installer
-clones `AIPANEL_REPO` rather than wherever it was downloaded from. A private
-fork also needs a token with read access to it:
-
-```bash
-curl -fsSL -H "Authorization: Bearer $GH_TOKEN" \
-  https://raw.githubusercontent.com/<owner>/<repo>/main/install.sh \
-  | sudo AIPANEL_TOKEN="$GH_TOKEN" \
-         AIPANEL_REPO="https://github.com/<owner>/<repo>.git" sh
-```
-
-Pick the port it listens on — it prompts, or pass it non-interactively:
+One command on a fresh Linux server — Debian/Ubuntu (apt), RHEL/Rocky/Alma/Fedora
+(dnf) or Alpine (apk):
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/i-m-satya/aipanel/main/install.sh \
-  | sudo sh -s -- --port 2087 --yes
+  | sudo sh -s -- --port 2087
 ```
 
-The installer puts PHP, MariaDB and the panel in place, generates the app key
-and database credentials, applies migrations, installs systemd units for the
-web, worker, code-worker and scheduler processes, opens the port in `ufw` or
-`firewalld` if either is active, and then prints what to do next.
+The port is prompted if you omit it. Installing from a **fork** needs that
+fork's clone URL too, since the installer clones `AIPANEL_REPO` rather than
+wherever the script came from (add `AIPANEL_TOKEN` as well if it is private):
 
-### Then: connect GitHub and claim the panel
+```bash
+curl -fsSL https://raw.githubusercontent.com/<owner>/<repo>/main/install.sh \
+  | sudo AIPANEL_REPO="https://github.com/<owner>/<repo>.git" sh
+```
 
-Sign-in is GitHub-only, so the panel needs an OAuth app before anyone can log
-in. Create one at <https://github.com/settings/developers> with the callback
-URL the installer printed:
+What it does, in order:
+
+1. installs PHP 8.3+, MariaDB, nginx, certbot and Composer (Composer's installer
+   is checksum-verified before it runs);
+2. clones the panel to `/opt/aipanel`, creates the `aipanel` system user and the
+   `sites` group;
+3. generates `APP_KEY` and database credentials, writes `.env` as `0600`, applies
+   the migrations;
+4. installs the tenant shell at `/usr/local/bin/aipanel-shell` and the SSH jail
+   at `/etc/ssh/sshd_config.d/aipanel-sites.conf` — validated with `sshd -t`
+   before any reload, and removed again rather than risk locking you out;
+5. starts four services: `aipanel` (panel), `aipanel-worker`, `aipanel-scheduler`
+   and `aipanel-agent` (the agent listens on loopback only);
+6. registers this host as its own managed node and mints the node's read-only
+   deploy key at `/etc/aipanel/deploy_key`;
+7. opens the port in `ufw`/`firewalld` if either is active, waits for `/health`,
+   and prints what to do next.
+
+### Then: two GitHub apps
+
+aipanel needs two things from GitHub, for two different jobs.
+
+**1. An OAuth app — so you can log in.** Create it at
+<https://github.com/settings/developers> with the callback URL the installer
+printed:
 
 ```
 Homepage URL:               http://<server>:<port>
@@ -114,6 +121,37 @@ GITHUB_OAUTH_CLIENT_ID=...
 GITHUB_OAUTH_CLIENT_SECRET=...
 
 systemctl restart aipanel
+```
+
+**2. A GitHub App — so the panel can read your repositories, register deploy
+keys, receive push webhooks and merge sandbox into main.** Create it under
+*Settings → Developer settings → GitHub Apps* with:
+
+| Setting | Value |
+|---|---|
+| Webhook URL | `http://<server>:<port>/webhooks/github` |
+| Permissions | Contents: read & write · Metadata: read · Pull requests: read & write |
+| Subscribe to events | Push |
+
+Download its private key, then:
+
+```bash
+sudo install -o aipanel -g aipanel -m 600 \
+  ~/downloaded-key.pem /etc/aipanel/github-app.pem
+
+# in /opt/aipanel/.env
+GITHUB_APP_ID=...
+GITHUB_APP_PRIVATE_KEY_PATH=/etc/aipanel/github-app.pem
+```
+
+Install the App on your account, note the installation id from the URL
+(`.../installations/<id>`), and link it — this prints the webhook secret to
+paste back into the App:
+
+```bash
+cd /opt/aipanel
+sudo -u aipanel php bin/console.php github:install <installation_id> <account_id> <your-github-login>
+sudo systemctl restart aipanel
 ```
 
 Then open the panel and sign in with GitHub. **The first GitHub account to

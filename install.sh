@@ -31,6 +31,7 @@ BRANCH="${AIPANEL_BRANCH:-main}"
 INSTALL_DIR="${AIPANEL_DIR:-/opt/aipanel}"
 PORT="${AIPANEL_PORT:-2087}"
 RUN_USER="aipanel"
+AGENT_PORT="${AIPANEL_AGENT_PORT:-9443}"
 ASSUME_YES="${AIPANEL_YES:-0}"
 TOKEN="${AIPANEL_TOKEN:-}"
 
@@ -233,6 +234,42 @@ getent group sites >/dev/null 2>&1 || groupadd sites 2>/dev/null || addgroup sit
 mkdir -p /var/www/acme
 chmod 755 /var/www/acme
 
+# Where tenants live. Each site gets a subdirectory owned by root, with
+# tenant-writable directories beneath it — that is what makes the SSH chroot
+# safe, since a chroot root must not be writable by the user inside it.
+mkdir -p /srv/sites
+chmod 755 /srv/sites
+
+step "Installing the tenant shell and SSH jail"
+
+# The restricted shell every tenant logs in with: an allowlist, no shell
+# metacharacters. This is the boundary between a tenant's SSH session and the
+# rest of the node, so it is installed root-owned and not writable by anyone else.
+install -o root -g root -m 0755 "${INSTALL_DIR}/agent/bin/aipanel-shell" /usr/local/bin/aipanel-shell
+
+# Chroot every member of the 'sites' group into its own home.
+if [ -d /etc/ssh/sshd_config.d ]; then
+    install -o root -g root -m 0644 \
+        "${INSTALL_DIR}/agent/templates/sshd-sites.conf.tpl" \
+        /etc/ssh/sshd_config.d/aipanel-sites.conf
+
+    # Never reload sshd with a config it rejects: that can lock everyone out.
+    if sshd -t 2>/dev/null; then
+        systemctl reload ssh 2>/dev/null || systemctl reload sshd 2>/dev/null || \
+            rc-service sshd reload >/dev/null 2>&1 || true
+        green "sshd jail installed for group 'sites'"
+    else
+        rm -f /etc/ssh/sshd_config.d/aipanel-sites.conf
+        red "sshd rejected the aipanel jail config; removed it and left sshd untouched.
+      Tenant SSH will not be jailed until this is resolved — check: sshd -t"
+    fi
+else
+    red "note: /etc/ssh/sshd_config.d does not exist on this system, so the tenant
+      SSH jail was not installed. Add the contents of
+      ${INSTALL_DIR}/agent/templates/sshd-sites.conf.tpl to /etc/ssh/sshd_config
+      by hand, then reload sshd."
+fi
+
 cd "$INSTALL_DIR"
 composer install --no-interaction --no-dev --prefer-dist --no-progress --quiet
 
@@ -361,9 +398,31 @@ NoNewPrivileges=yes
 WantedBy=multi-user.target
 UNIT
 
+    # The node agent. Runs as root because provisioning a tenant means creating
+    # a user, writing nginx and FPM config and reloading services. It listens on
+    # loopback only: nothing outside this host can reach it, and the control
+    # plane still authenticates every request with the node secret.
+    cat > /etc/systemd/system/aipanel-agent.service <<UNIT
+[Unit]
+Description=aipanel node agent
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=${INSTALL_DIR}
+ExecStart=${PHP_BIN} -S 127.0.0.1:${AGENT_PORT} ${INSTALL_DIR}/agent/aipanel-agent.php
+Restart=always
+RestartSec=2
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
     systemctl daemon-reload
     systemctl enable --now aipanel.service aipanel-worker.service \
-        aipanel-scheduler.service >/dev/null 2>&1
+        aipanel-scheduler.service aipanel-agent.service >/dev/null 2>&1
 else
     cat > /etc/init.d/aipanel <<RC
 #!/sbin/openrc-run
@@ -376,7 +435,27 @@ RC
     chmod +x /etc/init.d/aipanel
     rc-update add aipanel default >/dev/null 2>&1 || true
     rc-service aipanel start >/dev/null 2>&1 || true
+
+    cat > /etc/init.d/aipanel-agent <<RC
+#!/sbin/openrc-run
+command="${PHP_BIN}"
+command_args="-S 127.0.0.1:${AGENT_PORT} ${INSTALL_DIR}/agent/aipanel-agent.php"
+command_background=true
+pidfile="/run/aipanel-agent.pid"
+RC
+    chmod +x /etc/init.d/aipanel-agent
+    rc-update add aipanel-agent default >/dev/null 2>&1 || true
+    rc-service aipanel-agent start >/dev/null 2>&1 || true
 fi
+
+step "Registering this host as a managed node"
+
+# Single-server install: this box is both the control plane and the one node it
+# manages. Without this a panel has nowhere to put a website.
+"${PHP_BIN}" "${INSTALL_DIR}/bin/console.php" node:bootstrap-local "${AGENT_PORT}"
+
+# The agent config and deploy key are written by the command above as root.
+chmod 600 /etc/aipanel/agent.json /etc/aipanel/deploy_key 2>/dev/null || true
 
 # --------------------------------------------------------------- firewall
 
@@ -404,22 +483,36 @@ else
 fi
 
 bold "
-  Next: connect GitHub, then claim the panel
-  ------------------------------------------
-  Sign-in is GitHub-only, so the panel needs an OAuth app before anyone can
-  log in. Create one at https://github.com/settings/developers with:
+  Installed. Two steps left, both in GitHub.
+  ---------------------------------------------------------------
+  1) OAuth app — so you can sign in.
+     https://github.com/settings/developers
 
-    Homepage URL:               ${APP_URL}
-    Authorization callback URL: ${APP_URL}/auth/github/callback
+       Homepage URL:               ${APP_URL}
+       Authorization callback URL: ${APP_URL}/auth/github/callback
 
-  Then put its credentials in ${INSTALL_DIR}/.env:
+     Put the client id and secret in ${INSTALL_DIR}/.env
+     (GITHUB_OAUTH_CLIENT_ID / GITHUB_OAUTH_CLIENT_SECRET), then:
+       systemctl restart aipanel
 
-    GITHUB_OAUTH_CLIENT_ID=...
-    GITHUB_OAUTH_CLIENT_SECRET=...
+     Now open ${APP_URL} and sign in.
+     THE FIRST ACCOUNT TO SIGN IN BECOMES THE ADMINISTRATOR — do it before
+     this address is reachable by anyone else.
 
-  and restart:  systemctl restart aipanel
+  2) GitHub App — so the panel can read your repos, register deploy keys,
+     receive push webhooks and merge sandbox into main.
+     Settings -> Developer settings -> GitHub Apps
 
-  Finally open ${APP_URL} and sign in with GitHub.
-  THE FIRST ACCOUNT TO SIGN IN BECOMES THE ADMINISTRATOR — do it now, before
-  this address is reachable by anyone else.
+       Webhook URL:  ${APP_URL}/webhooks/github
+       Permissions:  Contents read+write, Metadata read, Pull requests read+write
+       Events:       Push
+
+     Save its private key to /etc/aipanel/github-app.pem, set GITHUB_APP_ID and
+     GITHUB_APP_PRIVATE_KEY_PATH in .env, install the App on your account, then:
+       cd ${INSTALL_DIR} && php bin/console.php github:install <installation_id> <account_id> <login>
+
+  Check on things with:
+    systemctl status aipanel aipanel-worker aipanel-scheduler aipanel-agent
+    curl -s http://127.0.0.1:${PORT}/health
+    journalctl -u aipanel -n 50
 "
