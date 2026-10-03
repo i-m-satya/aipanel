@@ -401,3 +401,85 @@ can claim:
 - Nothing here inspects what a tenant actually deploys. Phishing pages and
   miners are an abuse-handling problem, which is what the approval gate and
   suspension are for.
+
+---
+
+## 10. Appliance mode: owning nothing on the host
+
+§2.3 describes an agent that provisions a tenant by mutating the host: a Linux
+user, a chroot, an nginx vhost in `/etc/nginx`, a PHP-FPM pool in `/etc/php`.
+That is correct on a server aipanel owns, and wrong on one that already runs
+another control panel. aaPanel, cPanel and Plesk each compile their own nginx,
+PHP and MySQL into their own prefix — `/www/server` for aaPanel — so files
+written to `/etc/nginx` are read by nobody, `systemctl reload nginx` reloads the
+wrong process or none, and installing a second nginx fails because the first
+already holds port 80.
+
+Appliance mode is the answer. A tenant becomes a container and a directory:
+
+```
+/var/lib/aipanel/
+  app/                  the panel's own checkout
+  sites/<site>/         releases/, shared/, repo.git, current ->
+  edge/conf.d/          one generated server block per domain
+  acme/                 shared ACME challenge webroot
+  certs/                Let's Encrypt state, plus the edge's default certificate
+  secrets/, deploy_key  node secret, database passwords, the node's deploy key
+  .env, agent.json, docker-compose.yml
+```
+
+The host gains exactly three things: a container runtime, that one directory,
+and one systemd unit. No host user is created, nothing is written to `/etc` or
+`/www`, and the host's nginx, PHP and MySQL are never touched.
+
+### 10.1 Topology
+
+| Container | Role | Networks |
+|---|---|---|
+| `panel` | the UI and API, published on its own port | control, egress |
+| `worker`, `scheduler` | provisioning, deploys, certificates | control, egress |
+| `agent` | the node agent; holds the runtime socket | control, egress |
+| `edge` | the only service on the public ports; routes by Host header | tenants |
+| `db` | MySQL 8 | **control only** |
+| `aipanel-<site>` | one tenant: nginx + PHP-FPM, its own uid | tenants |
+
+Three networks, each for a reason. `control` is `internal`, so even a process
+that reached it finds no route out, and the database is on it *alone* — not
+reachable from the edge or from any tenant. `egress` exists because the panel and
+workers genuinely need the GitHub API and Let's Encrypt. `tenants` is where the
+edge meets tenant containers; a tenant is on that network and nothing else, so it
+can be proxied to without being able to see the panel, the database, or another
+tenant's control traffic.
+
+The panel is published separately from the edge rather than behind it, so the
+panel stays reachable when a tenant or the edge is broken — which is exactly when
+an operator needs it.
+
+### 10.2 Consequences worth knowing
+
+- **The edge never mounts a tenant's filesystem.** Each tenant container runs its
+  own nginx and serves its own static files; the edge only proxies. A compromised
+  edge cannot read tenant code.
+- **`current/` is read-only inside the tenant container**, so tenant code cannot
+  rewrite the release it is serving.
+- **uids are derived, not allocated.** With no host passwd database, each site's
+  uid comes from a hash of its site id into the 100000-165535 range: stable for a
+  site, distinct between sites, clear of anything a distribution uses.
+- **git runs in a throwaway container** with the node's deploy key mounted
+  read-only, so the host needs no git and no tenant can read a key that can fetch
+  every repository on the node.
+- **The edge is validated before every reload** (`nginx -t` inside the container).
+  A bad config would take every tenant on the panel offline, not just the one
+  being changed.
+- **Ports are configurable** precisely because they are the one shared resource.
+  If something else owns 80 and 443, give aipanel different ones and have the
+  existing web server proxy to them.
+- **Tenant SSH is not available in appliance mode.** The host-based mode offered a
+  chrooted shell per tenant; with no host users there is nothing to chroot into.
+  Tenants push to GitHub instead, which is the intended workflow — but it is a
+  real capability difference, not an oversight.
+- **The agent holds the runtime socket**, which is root-equivalent on the host. It
+  is reachable only on the internal control network, never published, and still
+  authenticates every request with the node secret — but it is the component to
+  review hardest, and the reason `isolation` is a deliberate choice rather than a
+  default that drifts.

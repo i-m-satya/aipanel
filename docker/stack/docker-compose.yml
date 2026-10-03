@@ -1,0 +1,134 @@
+# aipanel as an appliance.
+#
+# Everything the panel needs runs in these containers. On the host there is
+# exactly one dependency — a container runtime — plus one directory,
+# /var/lib/aipanel, and one systemd unit that brings this stack up.
+#
+# Nothing is installed into /etc, /usr or /www; no host user is created; no host
+# nginx, PHP or MySQL is touched. A panel installed this way can sit on a server
+# that already runs aaPanel, cPanel, Plesk or anything else without colliding
+# with it — the single shared resource is whichever ports the edge binds, which
+# is why they are configurable.
+
+name: aipanel
+
+services:
+  # The panel itself. No port of its own on the public interface: the edge
+  # publishes it, so there is one front door.
+  panel:
+    image: ${AIPANEL_IMAGE:-aipanel/panel:latest}
+    restart: unless-stopped
+    command: php -S 0.0.0.0:8080 -t public
+    env_file: /var/lib/aipanel/.env
+    # The panel's own front door. Separate from the edge on purpose: the edge
+    # serves customer domains, and the panel stays reachable even if a tenant
+    # or the edge is broken.
+    ports:
+      - "${AIPANEL_PANEL_PORT:-2087}:8080"
+    volumes:
+      - /var/lib/aipanel:/var/lib/aipanel
+    depends_on:
+      db: { condition: service_healthy }
+    # control reaches the database; egress reaches GitHub. Without egress the
+    # panel could not call the GitHub API at all.
+    networks: [ control, egress ]
+
+  # Provisioning, deploys and certificates. Reaches the node agent over the
+  # control network only.
+  worker:
+    image: ${AIPANEL_IMAGE:-aipanel/panel:latest}
+    restart: unless-stopped
+    command: php bin/worker.php
+    env_file: /var/lib/aipanel/.env
+    volumes:
+      - /var/lib/aipanel:/var/lib/aipanel
+    depends_on:
+      db: { condition: service_healthy }
+    # An in-flight deploy finishes rather than being cut in half by a restart.
+    stop_signal: SIGTERM
+    stop_grace_period: 120s
+    networks: [ control, egress ]
+
+  scheduler:
+    image: ${AIPANEL_IMAGE:-aipanel/panel:latest}
+    restart: unless-stopped
+    command: php bin/scheduler.php
+    env_file: /var/lib/aipanel/.env
+    volumes:
+      - /var/lib/aipanel:/var/lib/aipanel
+    depends_on:
+      db: { condition: service_healthy }
+    networks: [ control, egress ]
+
+  # The node agent. It needs the container runtime because in appliance mode
+  # "provisioning a site" means creating containers, not host users.
+  #
+  # Mounting the runtime socket is root-equivalent on the host, so the agent is
+  # reachable only on the internal control network, never published, and still
+  # authenticates every request with the node secret.
+  agent:
+    image: ${AIPANEL_IMAGE:-aipanel/panel:latest}
+    restart: unless-stopped
+    command: php -S 0.0.0.0:9443 agent/aipanel-agent.php
+    environment:
+      AIPANEL_AGENT_CONFIG: /var/lib/aipanel/agent.json
+    volumes:
+      - /var/lib/aipanel:/var/lib/aipanel
+      - ${AIPANEL_RUNTIME_SOCK:-/var/run/docker.sock}:/var/run/docker.sock
+    networks: [ control, egress ]
+
+  # The only service that binds a host port. Routes by Host header to each
+  # tenant's container and serves ACME challenges from a shared volume.
+  edge:
+    image: nginx:alpine
+    restart: unless-stopped
+    ports:
+      - "${AIPANEL_HTTP_PORT:-80}:80"
+      - "${AIPANEL_HTTPS_PORT:-443}:443"
+    volumes:
+      - /var/lib/aipanel/edge/conf.d:/etc/nginx/conf.d:ro
+      - /var/lib/aipanel/edge/nginx.conf:/etc/nginx/nginx.conf:ro
+      - /var/lib/aipanel/acme:/var/www/acme
+      - /var/lib/aipanel/certs:/etc/letsencrypt
+    networks: [ tenants ]
+
+  db:
+    image: mysql:8.0
+    restart: unless-stopped
+    environment:
+      MYSQL_DATABASE: aipanel
+      MYSQL_ROOT_PASSWORD_FILE: /run/secrets/db_root
+      MYSQL_USER: aipanel
+      MYSQL_PASSWORD_FILE: /run/secrets/db_pass
+    secrets: [ db_root, db_pass ]
+    volumes:
+      - db-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    networks: [ control ]
+
+secrets:
+  db_root:
+    file: /var/lib/aipanel/secrets/db_root
+  db_pass:
+    file: /var/lib/aipanel/secrets/db_pass
+
+networks:
+  # Panel, workers, agent and database. internal, so a tenant that somehow
+  # reached it would still find no route out, and tenants are not on it at all.
+  control:
+    name: aipanel-control
+    internal: true
+  # Outbound only: the panel and workers need the GitHub API and Let's Encrypt.
+  egress:
+    name: aipanel-egress
+  # Where the edge meets tenant containers. Tenants join this and nothing else,
+  # so they can be proxied to without being able to reach the control plane.
+  tenants:
+    name: aipanel-tenants
+
+volumes:
+  db-data:

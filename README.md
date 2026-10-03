@@ -66,6 +66,26 @@ environments are provisioned, both get certificates, and every push deploys.
 
 ## Install
 
+### Already running aaPanel, cPanel or Plesk?
+
+Install aipanel as an **appliance**. Everything it needs runs in its own
+containers, and on the host it owns only `/var/lib/aipanel`, one systemd unit and
+a container runtime — no host nginx, PHP, MySQL or users are touched, so your
+existing panel keeps working:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/i-m-satya/aipanel/main/bin/install-appliance.sh \
+  | sudo sh -s -- --http-port 8080 --https-port 8443
+```
+
+The one resource it cannot share is a port. If your existing web server owns 80
+and 443, give aipanel different ones as above and proxy to them; if it does not,
+drop the flags and aipanel takes 80/443 directly.
+
+Tenant SSH is the one feature appliance mode gives up — with no host users there
+is nothing to chroot into. Tenants push to GitHub instead, which is the intended
+workflow anyway. See [ARCHITECTURE.md §10](ARCHITECTURE.md).
+
 ### Hosting other people's sites?
 
 Add `--shared`. That turns on open GitHub signup, an approval queue for each

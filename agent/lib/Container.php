@@ -23,8 +23,21 @@ final class Container
         return 'aipanel-' . $siteUser;
     }
 
-    public static function network(string $siteUser): string
+    /**
+     * The network a tenant joins.
+     *
+     * In appliance mode every tenant joins one shared `tenants` network so the
+     * edge can proxy to it by container name — tenants still cannot reach the
+     * control network, which is where the panel, database and agent live. In
+     * host-container mode each tenant gets a private internal network instead,
+     * because nginx reaches it over a unix socket rather than by name.
+     */
+    public static function network(string $siteUser, array $config = []): string
     {
+        if (($config['isolation'] ?? '') === 'appliance') {
+            return (string) ($config['tenant_network'] ?? 'aipanel-tenants');
+        }
+
         return 'aipanel-net-' . $siteUser;
     }
 
@@ -57,15 +70,20 @@ final class Container
     {
         $runtime = self::runtime($config);
         $name = self::name($siteUser);
-        $network = self::network($siteUser);
+        $network = self::network($siteUser, $config);
         $home = $spec['home'];
         $socketDir = "/run/aipanel/{$siteUser}";
 
-        // A private network per site. Containers on different networks cannot
-        // reach each other, so one compromised tenant cannot scan or attack the
-        // others, and --internal keeps it off the host bridge entirely.
+        // Create the network if it is missing. In appliance mode it is the one
+        // shared tenants network, created by the stack; per-site networks are
+        // internal so a tenant cannot reach the host bridge.
         if (Exec::run([$runtime, 'network', 'inspect', $network])['code'] !== 0) {
-            Exec::mustRun([$runtime, 'network', 'create', '--internal', $network], $dryRun);
+            $create = [$runtime, 'network', 'create'];
+            if (($config['isolation'] ?? '') !== 'appliance') {
+                $create[] = '--internal';
+            }
+            $create[] = $network;
+            Exec::mustRun($create, $dryRun);
         }
 
         if (!$dryRun) {
@@ -116,7 +134,9 @@ final class Container
             '--volume', "{$socketDir}:/run/php:rw",
 
             '--env', 'AIPANEL_SITE=' . $siteUser,
-            '--env', 'PHP_FPM_LISTEN=/run/php/fpm.sock',
+            '--env', (($config['isolation'] ?? '') === 'appliance'
+                ? 'AIPANEL_LISTEN=0.0.0.0:8080'
+                : 'PHP_FPM_LISTEN=/run/php/fpm.sock'),
             '--workdir', '/app',
             $image,
         ];
@@ -135,7 +155,10 @@ final class Container
     {
         $runtime = self::runtime($config);
         Exec::run([$runtime, 'rm', '-f', self::name($siteUser)], $dryRun);
-        Exec::run([$runtime, 'network', 'rm', self::network($siteUser)], $dryRun);
+        // The shared tenants network belongs to the stack, not to one site.
+        if (($config['isolation'] ?? '') !== 'appliance') {
+            Exec::run([$runtime, 'network', 'rm', self::network($siteUser, $config)], $dryRun);
+        }
         Exec::run(['/bin/rm', '-rf', "/run/aipanel/{$siteUser}"], $dryRun);
     }
 

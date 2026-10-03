@@ -23,6 +23,7 @@ const AGENT_VERSION = '0.1.0';
 require __DIR__ . '/lib/Exec.php';
 require __DIR__ . '/lib/Templates.php';
 require __DIR__ . '/lib/Container.php';
+require __DIR__ . '/lib/Appliance.php';
 require __DIR__ . '/lib/Handlers.php';
 
 final class Agent
@@ -53,7 +54,14 @@ final class Agent
             // 'container' gives each tenant its own kernel-level sandbox and is
             // the only safe mode when strangers can sign up. 'user' is the
             // single-operator mode: Unix user + chroot + open_basedir only.
-            'isolation' => 'container',
+            // 'appliance' owns nothing on the host: tenants are containers and
+            // directories under appliance_root, routed by the edge container.
+            // That is the only mode safe to install beside another control
+            // panel. 'container' and 'user' both mutate the host.
+            'isolation' => 'appliance',
+            'appliance_root' => '/var/lib/aipanel',
+            'edge_container' => 'aipanel-edge-1',
+            'git_image' => 'alpine/git:latest',
             'container_runtime' => 'docker',
             'container_image' => 'aipanel/php:%s',
             'dry_run' => false,
@@ -210,7 +218,7 @@ final class Agent
     }
 }
 
-$configPath = '/etc/aipanel/agent.json';
+$configPath = getenv('AIPANEL_AGENT_CONFIG') ?: '/etc/aipanel/agent.json';
 foreach ($argv ?? [] as $arg) {
     if (str_starts_with((string) $arg, '--config=')) {
         $configPath = substr((string) $arg, 9);

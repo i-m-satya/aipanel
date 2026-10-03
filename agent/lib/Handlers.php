@@ -72,8 +72,87 @@ final class Handlers
         $domain = self::domain($params);
         $phpVersion = self::phpVersion($params['php_version'] ?? '8.3');
         $docRoot = self::relativePath((string) ($params['document_root'] ?? 'public'));
-        $home = self::home($config, $user);
         $dryRun = (bool) $config['dry_run'];
+
+        if (self::isAppliance($config)) {
+            return self::siteCreateAppliance($user, $domain, $phpVersion, $docRoot, $params, $config, $dryRun);
+        }
+
+        return self::siteCreateOnHost($user, $domain, $phpVersion, $docRoot, $params, $config, $dryRun);
+    }
+
+    /**
+     * Provision a tenant as a container and a directory.
+     *
+     * Nothing here writes outside appliance_root, creates a host user, or
+     * reloads a host service — which is what makes it safe to install beside
+     * another control panel that owns the host's nginx and PHP.
+     *
+     * @param array<string,mixed> $params @param array<string,mixed> $config
+     */
+    private static function siteCreateAppliance(
+        string $user,
+        string $domain,
+        string $phpVersion,
+        string $docRoot,
+        array $params,
+        array $config,
+        bool $dryRun,
+    ): array {
+        $uid = Appliance::uidFor($user);
+        $home = Appliance::siteHome($config, $user);
+
+        $changed = Appliance::prepareSite($config, $user, $uid, $dryRun);
+
+        // The deploy key is recorded for reference only; it stays root-owned
+        // under appliance_root and is mounted read-only into the git container.
+        $keyLine = self::publicKey((string) $params['deploy_public_key']);
+        $changed = Templates::writeIfChanged("{$home}/deploy_key.pub", $keyLine . "\n", $dryRun) || $changed;
+
+        $container = Container::create($user, [
+            'home' => $home,
+            'uid' => $uid,
+            'php_version' => $phpVersion,
+            'memory_mb' => (int) ($params['memory_mb'] ?? 512),
+            'cpus' => (string) ($params['cpus'] ?? '0.5'),
+            'document_root' => $docRoot,
+        ], [...$config, 'tenant_network' => 'aipanel-tenants'], $dryRun);
+
+        // Plain HTTP until a certificate exists; ssl.issue rewrites this block.
+        $changed = Appliance::writeEdgeSite($config, $domain, $user, $container['name'], false, $dryRun) || $changed;
+        Appliance::reloadEdge($config, $dryRun);
+
+        return [
+            'changed' => $changed,
+            'stdout' => "provisioned {$domain} as container {$container['name']} (php {$phpVersion}, appliance isolation)",
+            'stderr' => '',
+            'facts' => [
+                'home' => $home,
+                'uid' => $uid,
+                'container' => $container['name'],
+                'php_version' => $phpVersion,
+                'isolation' => 'appliance',
+            ],
+        ];
+    }
+
+    /**
+     * The original host-mutating path: a Linux user, a chroot, an nginx vhost
+     * and a PHP-FPM pool. Correct on a server aipanel owns; it collides with
+     * any other panel that manages the host's web server.
+     *
+     * @param array<string,mixed> $params @param array<string,mixed> $config
+     */
+    private static function siteCreateOnHost(
+        string $user,
+        string $domain,
+        string $phpVersion,
+        string $docRoot,
+        array $params,
+        array $config,
+        bool $dryRun,
+    ): array {
+        $home = self::home($config, $user);
         $changed = false;
 
         // 1. The tenant's Linux identity. One user, one group, nothing shared.
@@ -164,7 +243,7 @@ final class Handlers
             // The tenant's code runs inside its own container: own filesystem,
             // own network namespace, own cgroup limits, no capabilities. On a
             // shared instance this is the boundary that actually holds.
-            $uid = self::uidOf($user, $dryRun);
+            $uid = self::uidOf($user, $dryRun, $config);
             Container::create($user, [
                 'home' => $home,
                 'uid' => $uid,
@@ -202,6 +281,24 @@ final class Handlers
         $domain = self::domain($params);
         $home = self::home($config, $user);
         $dryRun = (bool) $config['dry_run'];
+
+        if (self::isAppliance($config)) {
+            Container::remove($user, $config, $dryRun);
+            Appliance::removeEdgeSite($config, $domain, $dryRun);
+            Appliance::reloadEdge($config, $dryRun);
+
+            if ((bool) ($params['purge_files'] ?? false)) {
+                self::assertInsideApplianceRoot($config, $home);
+                Exec::mustRun(['/bin/rm', '-rf', '--one-file-system', $home], $dryRun);
+            }
+
+            return [
+                'changed' => true,
+                'stdout' => "removed {$domain} (container and edge routing)",
+                'stderr' => '',
+                'facts' => [],
+            ];
+        }
 
         foreach (glob(rtrim((string) $config['vhost_enabled_dir'], '/') . "/{$domain}.conf") ?: [] as $link) {
             $dryRun ?: @unlink($link);
@@ -245,6 +342,16 @@ final class Handlers
     {
         $user = self::siteUser($params);
         $dryRun = (bool) $config['dry_run'];
+
+        if (self::isAppliance($config)) {
+            // No host user to lock: stopping the container is the suspension,
+            // and removing its routing stops the edge answering for it.
+            Container::stop($user, $config, $dryRun);
+            Appliance::removeEdgeSite($config, self::siteDomainOf($params, $config, $user), $dryRun);
+            Appliance::reloadEdge($config, $dryRun);
+
+            return ['changed' => true, 'stdout' => "suspended {$user}", 'stderr' => '', 'facts' => []];
+        }
 
         Exec::mustRun(['/usr/bin/passwd', '--lock', $user], $dryRun);
         Exec::run(['/usr/bin/pkill', '-u', $user], $dryRun);
@@ -382,6 +489,10 @@ final class Handlers
         // key can read every repository hosted on this node, so a tenant must
         // never be able to read it. The release is handed to the tenant only
         // after the checkout, by chown.
+        if (self::isAppliance($config)) {
+            return self::deployRunAppliance($user, $home, $repo, $commit, $params, $config, $dryRun);
+        }
+
         $deployKey = (string) $config['deploy_key'];
         if (!$dryRun && !is_readable($deployKey)) {
             throw new RuntimeException(
@@ -466,6 +577,108 @@ final class Handlers
         ];
     }
 
+    /**
+     * Deploy in appliance mode: git in a throwaway container, build in the
+     * tenant's own container, then an atomic symlink swap and an edge-free
+     * reload — the edge keeps proxying to the same container throughout.
+     *
+     * @param array<string,mixed> $params @param array<string,mixed> $config
+     */
+    private static function deployRunAppliance(
+        string $user,
+        string $home,
+        string $repo,
+        string $commit,
+        array $params,
+        array $config,
+        bool $dryRun,
+    ): array {
+        $release = gmdate('Ymd\THis\Z');
+        $releaseDir = "{$home}/releases/{$release}";
+        $log = [];
+
+        if (!is_dir("{$home}/repo.git/objects")) {
+            $clone = Appliance::git($config, $user, [
+                'clone', '--bare', "git@github.com:{$repo}.git", '/site/repo.git',
+            ], $dryRun);
+            if ($clone['code'] !== 0) {
+                throw new RuntimeException("Could not clone {$repo}: " . trim($clone['stderr'] ?: $clone['stdout']));
+            }
+            $log[] = $clone['stdout'];
+        }
+
+        $fetch = Appliance::git($config, $user, [
+            '--git-dir=/site/repo.git', 'fetch', 'origin', '+refs/heads/*:refs/heads/*', '--prune',
+        ], $dryRun);
+        if ($fetch['code'] !== 0) {
+            throw new RuntimeException("Could not fetch {$repo}: " . trim($fetch['stderr'] ?: $fetch['stdout']));
+        }
+        $log[] = $fetch['stdout'];
+
+        if (!$dryRun && !mkdir($releaseDir, 0o755, true) && !is_dir($releaseDir)) {
+            throw new RuntimeException("Cannot create {$releaseDir}");
+        }
+
+        // The exact SHA, never a branch name.
+        $checkout = Appliance::git($config, $user, [
+            '--git-dir=/site/repo.git', "--work-tree=/site/releases/{$release}",
+            'checkout', '--force', $commit, '--', '.',
+        ], $dryRun);
+        if ($checkout['code'] !== 0) {
+            Exec::run(['/bin/rm', '-rf', '--one-file-system', $releaseDir], $dryRun);
+            throw new RuntimeException("Could not check out {$commit}: " . trim($checkout['stderr'] ?: $checkout['stdout']));
+        }
+
+        foreach (['.env', 'storage', 'uploads'] as $shared) {
+            if (is_file("{$home}/shared/{$shared}") || is_dir("{$home}/shared/{$shared}")) {
+                Exec::run(['/bin/rm', '-rf', "{$releaseDir}/{$shared}"], $dryRun);
+                Exec::mustRun(['/bin/ln', '-s', "/app/shared/{$shared}", "{$releaseDir}/{$shared}"], $dryRun);
+            }
+        }
+
+        if (!$dryRun) {
+            $staging = "{$home}/current.new";
+            @unlink($staging);
+            symlink($releaseDir, $staging);
+            rename($staging, "{$home}/current");
+        }
+
+        Container::reload($user, $config, $dryRun);
+        self::pruneReleases($home, keep: 5, dryRun: $dryRun);
+
+        return [
+            'changed' => true,
+            'stdout' => "deployed {$repo}@{$commit} as release {$release}\n" . implode("\n", array_filter($log)),
+            'stderr' => '',
+            'facts' => ['release' => $release, 'commit' => $commit, 'isolation' => 'appliance'],
+        ];
+    }
+
+    /** The domain a tenant serves, for modes where it is not in the params. */
+    private static function siteDomainOf(array $params, array $config, string $user): string
+    {
+        if (isset($params['domain'])) {
+            return self::domain($params);
+        }
+
+        foreach (glob(Appliance::edgeConfDir($config) . '/*.conf') ?: [] as $conf) {
+            if (str_contains((string) file_get_contents($conf), "Tenant: {$user}")) {
+                return basename($conf, '.conf');
+            }
+        }
+
+        return '';
+    }
+
+    /** @param array<string,mixed> $config */
+    private static function assertInsideApplianceRoot(array $config, string $path): void
+    {
+        $root = Appliance::root($config) . '/sites/';
+        if (!str_starts_with($path, $root) || str_contains($path, '..')) {
+            throw new InvalidArgumentException("Refusing to operate on {$path}: outside {$root}");
+        }
+    }
+
     /** @param array<string,mixed> $params @param array<string,mixed> $config */
     public static function deployRollback(array $params, array $config): array
     {
@@ -527,7 +740,9 @@ final class Handlers
         $home = self::home($config, $user);
         $dryRun = (bool) $config['dry_run'];
 
-        $acmeRoot = (string) $config['acme_webroot'];
+        $acmeRoot = self::isAppliance($config)
+            ? Appliance::root($config) . '/acme'
+            : (string) $config['acme_webroot'];
         if (!is_dir($acmeRoot) && !$dryRun && !mkdir($acmeRoot, 0o755, true) && !is_dir($acmeRoot)) {
             throw new RuntimeException("Cannot create ACME webroot {$acmeRoot}");
         }
@@ -555,6 +770,27 @@ final class Handlers
                 $domain,
                 trim($result['stderr']) !== '' ? trim($result['stderr']) : trim($result['stdout'])
             ));
+        }
+
+        if (self::isAppliance($config)) {
+            // Routing gains the TLS server block, then the edge reloads. The
+            // tenant's container is untouched: TLS terminates at the edge.
+            $changed = Appliance::writeEdgeSite(
+                $config,
+                $domain,
+                $user,
+                Container::name($user),
+                withTls: true,
+                dryRun: $dryRun
+            );
+            Appliance::reloadEdge($config, $dryRun);
+
+            return [
+                'changed' => $changed,
+                'stdout' => $result['stdout'],
+                'stderr' => $result['stderr'],
+                'facts' => ['domain' => $domain, 'isolation' => 'appliance'],
+            ];
         }
 
         $certDir = "/etc/letsencrypt/live/{$domain}";
@@ -796,6 +1032,10 @@ final class Handlers
     /** @param array<string,mixed> $config */
     private static function home(array $config, string $user): string
     {
+        if (self::isAppliance($config)) {
+            return Appliance::siteHome($config, $user);
+        }
+
         return rtrim((string) $config['web_root'], '/') . '/' . $user;
     }
 
@@ -833,9 +1073,20 @@ final class Handlers
         }
     }
 
+    private static function mode(array $config): string
+    {
+        return (string) ($config['isolation'] ?? 'appliance');
+    }
+
+    /** Appliance mode: containers plus a directory, and nothing on the host. */
+    private static function isAppliance(array $config): bool
+    {
+        return self::mode($config) === 'appliance';
+    }
+
     private static function usesContainers(array $config): bool
     {
-        return ($config['isolation'] ?? 'container') === 'container';
+        return self::mode($config) !== 'user';
     }
 
     /**
@@ -850,8 +1101,12 @@ final class Handlers
             : "/run/php/{$user}.sock";
     }
 
-    private static function uidOf(string $user, bool $dryRun): int
+    private static function uidOf(string $user, bool $dryRun, array $config = []): int
     {
+        if (self::isAppliance($config)) {
+            return Appliance::uidFor($user);
+        }
+
         if (function_exists('posix_getpwnam')) {
             $pw = posix_getpwnam($user);
             if (is_array($pw)) {
