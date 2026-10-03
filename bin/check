@@ -142,6 +142,31 @@ assert_shell deny  "nc -l 1234"
 assert_shell deny  "cat /etc/shadow; id"
 assert_shell deny  "ls \$(whoami)"
 
+# The database version gate decides whether a host's existing server can run the
+# panel at all. Getting the MariaDB 10.5/10.6 boundary wrong means either
+# refusing a usable server or accepting one whose queue cannot work.
+if [ -f install.sh ]; then
+    gate_ok=1
+    # Reuse the installer's own function rather than a copy that can drift.
+    eval "$(sed -n '/^supports_skip_locked()/,/^}/p' install.sh)"
+
+    check_gate() {
+        want="$1"; version="$2"
+        if supports_skip_locked "$version"; then got=usable; else got=old; fi
+        [ "$got" = "$want" ] || { red "db gate: ${version} judged ${got}, expected ${want}"; gate_ok=0; }
+    }
+
+    check_gate old    "5.7.44-log"
+    check_gate usable "8.0.36"
+    check_gate usable "8.4.2"
+    check_gate old    "10.5.23-MariaDB-1:10.5.23+maria~ubu2004"
+    check_gate usable "10.6.23-MariaDB-0ubuntu0.22.04.1"
+    check_gate usable "11.4.2-MariaDB"
+    check_gate old    "5.5.68-MariaDB"
+
+    [ "$gate_ok" = 1 ] && green "database version gate accepts MySQL 8+/MariaDB 10.6+ and refuses older"
+fi
+
 # Every nginx template must render with no placeholder left behind: an unfilled
 # one reaches a live web server.
 # shellcheck disable=SC2016  # the PHP below is deliberately not shell-expanded

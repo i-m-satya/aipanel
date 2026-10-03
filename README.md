@@ -102,6 +102,29 @@ curl -fsSL https://raw.githubusercontent.com/<owner>/<repo>/main/install.sh \
   | sudo AIPANEL_REPO="https://github.com/<owner>/<repo>.git" sh
 ```
 
+### If the server already has MySQL or MariaDB
+
+The installer no longer fights an existing database — that aborts the whole
+package run. It probes first:
+
+| What it finds | What it does |
+|---|---|
+| MySQL 8.0+ or MariaDB 10.6+ | uses it |
+| MySQL 5.7, MariaDB 10.5 or older | leaves it alone and runs a dedicated MySQL 8 for the panel in a container |
+| Nothing | installs MariaDB |
+
+The version floor is not arbitrary: the job queue claims work with
+`FOR UPDATE SKIP LOCKED`, which needs MySQL 8.0 or MariaDB 10.6.
+
+Force the dedicated-database path with `--db container`. If the existing server
+has a root password the script cannot guess, pass it:
+`AIPANEL_DB_ROOT_PASS=... sh install.sh ...`.
+
+PHP 8.3 is also a floor. Ubuntu 22.04 ships 8.1 and Debian 12 ships 8.2, so on
+those the installer adds a PHP repository (`ppa:ondrej/php` on Ubuntu,
+`packages.sury.org` on Debian) rather than failing a version check after a long
+install.
+
 What it does, in order:
 
 1. installs PHP 8.3+, MariaDB, nginx, certbot and Composer (Composer's installer
