@@ -1,0 +1,236 @@
+#!/bin/sh
+#
+# Run every check CI would run, locally. No GitHub, no runners, no account.
+#
+#   bin/check              everything available on this machine
+#   bin/check --fast       skip the MySQL migration check (no container needed)
+#   bin/check --hook       install this as a git pre-push hook, then exit
+#
+# Exit status is 0 only if every check that ran passed, so this is safe to use
+# as a pre-push hook or in any other CI you point at the repository.
+
+set -eu
+
+cd "$(dirname "$0")/.."
+
+FAST=0
+PASSED=0
+FAILED=0
+SKIPPED=0
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --fast) FAST=1; shift ;;
+        --hook) INSTALL_HOOK=1; shift ;;
+        --help|-h)
+            sed -n '3,11p' "$0" | sed 's/^# \{0,1\}//'
+            exit 0
+            ;;
+        *) printf 'unknown option: %s (try --help)\n' "$1" >&2; exit 2 ;;
+    esac
+done
+
+green() { printf '  \033[32m✓\033[0m %s\n' "$*"; PASSED=$((PASSED + 1)); }
+red()   { printf '  \033[31m✗\033[0m %s\n' "$*" >&2; FAILED=$((FAILED + 1)); }
+skip()  { printf '  \033[33m–\033[0m %s\n' "$*"; SKIPPED=$((SKIPPED + 1)); }
+head2() { printf '\n\033[1m%s\033[0m\n' "$*"; }
+
+# Install as a pre-push hook so a broken push is caught before it leaves the
+# machine — which is most of what CI was protecting.
+if [ "${INSTALL_HOOK:-0}" = 1 ]; then
+    [ -d .git ] || { printf 'not a git checkout\n' >&2; exit 1; }
+    mkdir -p .git/hooks
+    cat > .git/hooks/pre-push <<'HOOK'
+#!/bin/sh
+# Installed by bin/check --hook
+exec ./bin/check --fast
+HOOK
+    chmod +x .git/hooks/pre-push
+    printf 'Installed .git/hooks/pre-push (runs bin/check --fast).\n'
+    printf 'Skip it for one push with: git push --no-verify\n'
+    exit 0
+fi
+
+PHP_BIN="$(command -v php || true)"
+[ -n "$PHP_BIN" ] || { printf 'php is not installed\n' >&2; exit 1; }
+
+# ---------------------------------------------------------------- syntax
+
+head2 "Syntax"
+
+if find . -path ./vendor -prune -o -name '*.php' -print0 \
+    | xargs -0 -n1 -P4 "$PHP_BIN" -l > /tmp/aipanel-lint.$$ 2>&1; then
+    green "every PHP file parses ($(find . -path ./vendor -prune -o -name '*.php' -print | wc -l | tr -d ' ') files)"
+else
+    red "PHP syntax errors:"
+    grep -v '^No syntax errors' /tmp/aipanel-lint.$$ | head -20 >&2
+fi
+rm -f /tmp/aipanel-lint.$$
+
+for script in install.sh bin/check agent/bin/aipanel-shell; do
+    if sh -n "$script" 2>/dev/null; then
+        green "$script parses"
+    else
+        red "$script has a shell syntax error"
+    fi
+done
+
+if command -v shellcheck >/dev/null 2>&1; then
+    if shellcheck --shell=sh install.sh bin/check agent/bin/aipanel-shell; then
+        green "shellcheck clean"
+    else
+        red "shellcheck findings above"
+    fi
+else
+    skip "shellcheck not installed (apt install shellcheck)"
+fi
+
+# ------------------------------------------------------------------ tests
+
+head2 "Tests"
+
+if [ ! -d vendor ]; then
+    if command -v composer >/dev/null 2>&1; then
+        composer install --no-interaction --quiet
+    else
+        skip "composer not installed, so dependencies are missing"
+    fi
+fi
+
+if [ -x vendor/bin/phpunit ]; then
+    if vendor/bin/phpunit --no-coverage; then
+        green "phpunit"
+    else
+        red "phpunit failures above"
+    fi
+else
+    skip "phpunit not installed (composer install)"
+fi
+
+if command -v composer >/dev/null 2>&1; then
+    if composer validate --strict --no-check-publish > /dev/null 2>&1; then
+        green "composer.json valid"
+    else
+        red "composer validate --strict failed"
+    fi
+else
+    skip "composer not installed"
+fi
+
+# ------------------------------------------------------- behaviour checks
+
+head2 "Behaviour"
+
+# The restricted shell is a security boundary; assert it still refuses what it
+# must, rather than assuming the allowlist survived the last edit.
+assert_shell() {
+    want="$1"; cmd="$2"
+    if SSH_ORIGINAL_COMMAND="$cmd" sh agent/bin/aipanel-shell >/dev/null 2>&1; then
+        got=allow
+    else
+        got=deny
+    fi
+    if [ "$got" = "$want" ]; then
+        green "site shell $([ "$want" = allow ] && echo allows || echo refuses): ${cmd}"
+    else
+        red "site shell should $want but did $got: ${cmd}"
+    fi
+}
+
+assert_shell allow "git status"
+assert_shell deny  "nc -l 1234"
+assert_shell deny  "cat /etc/shadow; id"
+assert_shell deny  "ls \$(whoami)"
+
+# Every nginx template must render with no placeholder left behind: an unfilled
+# one reaches a live web server.
+# shellcheck disable=SC2016  # the PHP below is deliberately not shell-expanded
+if "$PHP_BIN" -r '
+require "agent/lib/Templates.php";
+$vars = [
+  "domain"=>"example.com","server_names"=>"example.com","user"=>"site_abc123",
+  "root"=>"/srv/sites/site_abc123/current/public","fpm_socket"=>"/run/php/x.sock",
+  "acme_webroot"=>"/var/www/acme","tls"=>"","http_body"=>"",
+  "home"=>"/srv/sites/site_abc123","php_version"=>"8.3",
+];
+foreach (["nginx-vhost.conf.tpl","php-fpm-pool.conf.tpl","site-slice.conf.tpl"] as $t) {
+  $out = Templates::render($t, $vars);
+  if (preg_match("/\{\{/", $out)) { fwrite(STDERR, "$t has an unfilled placeholder\n"); exit(1); }
+}
+exit(0);
+' 2>/dev/null; then
+    green "config templates render with no placeholders left"
+else
+    red "a config template did not render cleanly"
+fi
+
+# ----------------------------------------------------------- the schema
+
+head2 "Schema"
+
+if [ "$FAST" = 1 ]; then
+    skip "migrations against MySQL (--fast)"
+elif command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+    NAME="aipanel-check-mysql-$$"
+    printf '  starting MySQL…\n'
+    docker run --rm --detach --name "$NAME" \
+        -e MYSQL_ROOT_PASSWORD=root -e MYSQL_DATABASE=aipanel \
+        -p 33061:3306 mysql:8.0 > /dev/null
+
+    # shellcheck disable=SC2064
+    trap "docker rm -f '$NAME' > /dev/null 2>&1 || true" EXIT INT TERM
+
+    ready=0
+    i=0
+    while [ "$i" -lt 60 ]; do
+        if docker exec "$NAME" mysqladmin ping -h localhost -uroot -proot > /dev/null 2>&1; then
+            ready=1
+            break
+        fi
+        i=$((i + 1))
+        sleep 1
+    done
+
+    if [ "$ready" = 0 ]; then
+        red "MySQL did not become ready"
+    else
+        export DB_DSN="mysql:host=127.0.0.1;port=33061;dbname=aipanel;charset=utf8mb4"
+        export DB_USER=root
+        export DB_PASS=root
+        export REDIS_DSN=""
+        APP_KEY="$("$PHP_BIN" -r 'echo base64_encode(random_bytes(32));')"
+        export APP_KEY
+
+        if "$PHP_BIN" bin/console.php migrate > /tmp/aipanel-migrate.$$ 2>&1; then
+            green "migrations apply to a real MySQL 8"
+
+            # Applying twice must be a no-op, or an upgrade re-runs DDL.
+            if "$PHP_BIN" bin/console.php migrate 2>&1 | grep -q 'Nothing to migrate'; then
+                green "migrations are idempotent"
+            else
+                red "re-running migrations was not a no-op"
+            fi
+        else
+            red "migrations failed:"
+            tail -20 /tmp/aipanel-migrate.$$ >&2
+        fi
+        rm -f /tmp/aipanel-migrate.$$
+    fi
+
+    docker rm -f "$NAME" > /dev/null 2>&1 || true
+    trap - EXIT INT TERM
+else
+    skip "migrations against MySQL (needs a running docker; use --fast to silence)"
+fi
+
+# ----------------------------------------------------------------- result
+
+printf '\n'
+if [ "$FAILED" -gt 0 ]; then
+    printf '\033[31m%d failed\033[0m, %d passed, %d skipped\n' "$FAILED" "$PASSED" "$SKIPPED" >&2
+    exit 1
+fi
+
+printf '\033[32mall %d checks passed\033[0m' "$PASSED"
+[ "$SKIPPED" -gt 0 ] && printf ' (%d skipped)' "$SKIPPED"
+printf '\n'

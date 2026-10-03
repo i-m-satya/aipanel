@@ -250,9 +250,20 @@ php bin/console.php github:install <installation_id> <account_id> <org-login>
 | Scheduler | `php bin/scheduler.php` | replicas — one wins the leader lease |
 
 ```bash
-composer test          # phpunit
+bin/check              # everything CI runs, locally — no GitHub account needed
+bin/check --fast       # skip the MySQL migration check
+bin/check --hook       # run it automatically on every git push
+composer test          # phpunit only
 php bin/console.php queue:status
 ```
+
+`bin/check` is the same set of checks the GitHub workflow runs: PHP and shell
+syntax, shellcheck, phpunit, `composer validate`, assertions that the tenant
+shell still refuses what it must, that every config template renders with no
+placeholder left behind, and — when a container runtime is available — the
+migrations applied twice against a real MySQL 8 to prove they are idempotent.
+It exits non-zero if anything fails, so it works as a pre-push hook or inside
+any other CI.
 
 ---
 
