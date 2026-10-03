@@ -67,7 +67,7 @@ else
 fi
 rm -f /tmp/aipanel-lint.$$
 
-for script in install.sh bin/check agent/bin/aipanel-shell; do
+for script in install.sh bin/install-appliance.sh bin/check agent/bin/aipanel-shell docker/tenant/entrypoint.sh; do
     if sh -n "$script" 2>/dev/null; then
         green "$script parses"
     else
