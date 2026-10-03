@@ -137,7 +137,7 @@ final class Handlers
             'server_names' => implode(' ', [$domain, ...$aliases]),
             'user' => $user,
             'root' => "{$home}/current/{$docRoot}",
-            'fpm_socket' => "/run/php/{$user}.sock",
+            'fpm_socket' => self::fpmSocket($user, $config),
             'acme_webroot' => (string) $config['acme_webroot'],
             'tls' => '',
             'http_body' => '',
@@ -159,13 +159,39 @@ final class Handlers
 
         Exec::mustRun(['/usr/sbin/nginx', '-t'], $dryRun);
         Exec::mustRun(['/bin/systemctl', 'reload', 'nginx'], $dryRun);
-        Exec::mustRun(['/bin/systemctl', 'reload', "php{$phpVersion}-fpm"], $dryRun);
+
+        if (self::usesContainers($config)) {
+            // The tenant's code runs inside its own container: own filesystem,
+            // own network namespace, own cgroup limits, no capabilities. On a
+            // shared instance this is the boundary that actually holds.
+            $uid = self::uidOf($user, $dryRun);
+            Container::create($user, [
+                'home' => $home,
+                'uid' => $uid,
+                'php_version' => $phpVersion,
+                'memory_mb' => (int) ($params['memory_mb'] ?? 512),
+                'cpus' => (string) ($params['cpus'] ?? '0.5'),
+                'document_root' => $docRoot,
+            ], $config, $dryRun);
+        } else {
+            Exec::mustRun(['/bin/systemctl', 'reload', "php{$phpVersion}-fpm"], $dryRun);
+        }
 
         return [
             'changed' => $changed,
-            'stdout' => "provisioned {$domain} as {$user} (php {$phpVersion})",
+            'stdout' => sprintf(
+                'provisioned %s as %s (php %s, %s isolation)',
+                $domain,
+                $user,
+                $phpVersion,
+                self::usesContainers($config) ? 'container' : 'user'
+            ),
             'stderr' => '',
-            'facts' => ['home' => $home, 'php_version' => $phpVersion],
+            'facts' => [
+                'home' => $home,
+                'php_version' => $phpVersion,
+                'isolation' => self::usesContainers($config) ? 'container' : 'user',
+            ],
         ];
     }
 
@@ -189,6 +215,10 @@ final class Handlers
 
         Exec::mustRun(['/usr/sbin/nginx', '-t'], $dryRun);
         Exec::mustRun(['/bin/systemctl', 'reload', 'nginx'], $dryRun);
+
+        if (self::usesContainers($config)) {
+            Container::remove($user, $config, $dryRun);
+        }
 
         if (self::userExists($user)) {
             Exec::run(['/usr/bin/pkill', '-u', $user], $dryRun);
@@ -218,6 +248,10 @@ final class Handlers
 
         Exec::mustRun(['/usr/bin/passwd', '--lock', $user], $dryRun);
         Exec::run(['/usr/bin/pkill', '-u', $user], $dryRun);
+
+        if (self::usesContainers($config)) {
+            Container::stop($user, $config, $dryRun);
+        }
         $home = self::home($config, $user);
         if (is_file("{$home}/.ssh/authorized_keys")) {
             Exec::mustRun(['/bin/mv', "{$home}/.ssh/authorized_keys", "{$home}/.ssh/authorized_keys.suspended"], $dryRun);
@@ -535,7 +569,7 @@ final class Handlers
             'server_names' => $domain,
             'user' => $user,
             'root' => "{$home}/current/{$docRoot}",
-            'fpm_socket' => "/run/php/{$user}.sock",
+            'fpm_socket' => self::fpmSocket($user, $config),
             'acme_webroot' => $acmeRoot,
             'tls' => self::tlsBlock($domain),
             'http_body' => self::redirectToHttps(),
@@ -563,6 +597,12 @@ final class Handlers
      */
     private static function reloadPool(string $user, array $config, bool $dryRun): void
     {
+        if (self::usesContainers($config)) {
+            Container::reload($user, $config, $dryRun);
+
+            return;
+        }
+
         foreach (glob('/etc/php/*/fpm/pool.d/' . $user . '.conf') ?: [] as $pool) {
             if (preg_match('#/php/([0-9.]+)/#', $pool, $m) === 1) {
                 Exec::mustRun(['/bin/systemctl', 'reload', "php{$m[1]}-fpm"], $dryRun);
@@ -791,6 +831,44 @@ final class Handlers
             }
             Exec::run(['/bin/rm', '-rf', '--one-file-system', "{$home}/releases/{$old}"], $dryRun);
         }
+    }
+
+    private static function usesContainers(array $config): bool
+    {
+        return ($config['isolation'] ?? 'container') === 'container';
+    }
+
+    /**
+     * Where nginx finds this tenant's php-fpm socket. With containers it is a
+     * per-site directory bind-mounted into the container; otherwise it is the
+     * host pool's socket.
+     */
+    private static function fpmSocket(string $user, array $config): string
+    {
+        return self::usesContainers($config)
+            ? "/run/aipanel/{$user}/fpm.sock"
+            : "/run/php/{$user}.sock";
+    }
+
+    private static function uidOf(string $user, bool $dryRun): int
+    {
+        if (function_exists('posix_getpwnam')) {
+            $pw = posix_getpwnam($user);
+            if (is_array($pw)) {
+                return (int) $pw['uid'];
+            }
+        }
+
+        $result = Exec::run(['/usr/bin/id', '-u', $user]);
+        if ($result['code'] === 0 && trim($result['stdout']) !== '') {
+            return (int) trim($result['stdout']);
+        }
+
+        if ($dryRun) {
+            return 60000;
+        }
+
+        throw new RuntimeException("Cannot resolve uid for {$user}");
     }
 
     private static function userExists(string $user): bool

@@ -2,6 +2,7 @@
 
 declare(strict_types=1);
 
+use AIPanel\Http\Controllers\AdminController;
 use AIPanel\Http\Controllers\AuthController;
 use AIPanel\Http\Controllers\DashboardController;
 use AIPanel\Http\Controllers\SiteController;
@@ -35,6 +36,15 @@ $routes = static function (Router $router) use ($auth, $authed): Router {
     // "Make it live": merge sandbox into the production branch.
     $router->post('/sites/{id}/promote', [SiteController::class, 'promote'], $authed);
     $router->post('/sites/{id}/ssh-keys', [SiteController::class, 'addSshKey'], $authed);
+    // Prove control of a hostname before it can be hosted here.
+    $router->post('/domains/verify', [SiteController::class, 'verifyDomain'], $authed);
+
+    // Operator area. Admin-only, and it 404s for everyone else.
+    $router->get('/admin', [AdminController::class, 'index'], $auth);
+    $router->post('/admin/sites/{id}/approve', [AdminController::class, 'approve'], $authed);
+    $router->post('/admin/sites/{id}/reject', [AdminController::class, 'reject'], $authed);
+    $router->post('/admin/accounts/{id}/suspend', [AdminController::class, 'suspendAccount'], $authed);
+    $router->post('/admin/accounts/{id}/trust', [AdminController::class, 'trustAccount'], $authed);
 
     return $router;
 };

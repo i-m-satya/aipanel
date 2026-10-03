@@ -92,6 +92,7 @@ final class AuthController
         session_regenerate_id(true);
         $_SESSION['user_id'] = (int) $user['id'];
         $_SESSION['github_login'] = (string) $user['github_login'];
+        $_SESSION['role'] = (string) $user['role'];
 
         return Response::redirect('/');
     }

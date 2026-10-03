@@ -33,8 +33,11 @@ final class DeployService
      */
     public function onPush(string $repo, string $ref, string $commit, ?string $pusher = null): array
     {
+        // approval_state is part of the query, not an afterthought: a push must
+        // not deploy a site a human has not approved, however valid the webhook.
         $sites = $this->db->select(
-            'SELECT * FROM sites WHERE repo = ? AND status IN (?, ?)',
+            "SELECT * FROM sites
+             WHERE repo = ? AND status IN (?, ?) AND approval_state = 'approved'",
             [$repo, 'active', 'provisioning']
         );
 

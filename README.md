@@ -66,6 +66,25 @@ environments are provisioned, both get certificates, and every push deploys.
 
 ## Install
 
+### Hosting other people's sites?
+
+Add `--shared`. That turns on open GitHub signup, an approval queue for each
+untrusted account's first site, and **container isolation per tenant** — and
+installs a container runtime:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/i-m-satya/aipanel/main/install.sh \
+  | sudo sh -s -- --port 2087 --shared
+```
+
+On a shared instance a customer must prove two things before anything runs: that
+they control the hostname (a DNS TXT record) and that their own GitHub App
+installation grants the repository. See
+[ARCHITECTURE.md §9](ARCHITECTURE.md) for the threat model, including what this
+does **not** solve.
+
+### Hosting only your own sites
+
 One command on a fresh Linux server — Debian/Ubuntu (apt), RHEL/Rocky/Alma/Fedora
 (dnf) or Alpine (apk):
 

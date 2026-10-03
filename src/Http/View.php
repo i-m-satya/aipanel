@@ -20,6 +20,7 @@ final class View
 
         $data['csrf'] = Middleware\VerifyCsrf::token();
         $data['github_login'] = $_SESSION['github_login'] ?? null;
+        $data['role'] = $_SESSION['role'] ?? null;
 
         extract($data, EXTR_SKIP);
         ob_start();

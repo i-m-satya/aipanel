@@ -9,6 +9,7 @@ use AIPanel\Domain\NodeRepository;
 use AIPanel\Domain\SiteRepository;
 use AIPanel\Domain\UserRepository;
 use AIPanel\Git\GitHubApp;
+use AIPanel\Http\Controllers\AdminController;
 use AIPanel\Http\Controllers\AuthController;
 use AIPanel\Http\Controllers\DashboardController;
 use AIPanel\Http\Controllers\SiteController;
@@ -27,6 +28,10 @@ use AIPanel\Support\Container;
 use AIPanel\Support\Crypto;
 use AIPanel\Support\Env;
 use AIPanel\Tasks\TaskValidator;
+use AIPanel\Tenancy\DomainVerifier;
+use AIPanel\Tenancy\Quota;
+use AIPanel\Tenancy\RateLimiter;
+use AIPanel\Tenancy\RepositoryAccess;
 
 require dirname(__DIR__) . '/vendor/autoload.php';
 
@@ -105,6 +110,20 @@ $container->set(DeployService::class, static fn (Container $c): DeployService =>
     $c->get(GitHubApp::class),
 ));
 
+// Shared-hosting guards: ownership, capacity and abuse.
+$container->set(DomainVerifier::class, static fn (Container $c): DomainVerifier => new DomainVerifier(
+    $c->get(Database::class),
+));
+
+$container->set(RepositoryAccess::class, static fn (Container $c): RepositoryAccess => new RepositoryAccess(
+    $c->get(Database::class),
+    $c->get(GitHubApp::class),
+));
+
+$container->set(Quota::class, static fn (Container $c): Quota => new Quota($c->get(Database::class)));
+
+$container->set(RateLimiter::class, static fn (Container $c): RateLimiter => new RateLimiter($c->get(Database::class)));
+
 $container->set(PromotionService::class, static fn (Container $c): PromotionService => new PromotionService(
     $c->get(Database::class),
     $c->get(SiteRepository::class),
@@ -134,12 +153,23 @@ $container->set(DashboardController::class, static fn (Container $c): DashboardC
 
 $container->set(SiteController::class, static fn (Container $c): SiteController => new SiteController(
     $c->get(Database::class),
+    $c->get(Config::class),
     $c->get(SiteRepository::class),
     $c->get(NodeRepository::class),
     $c->get(JobQueue::class),
     $c->get(DeployService::class),
     $c->get(PromotionService::class),
     $c->get(GitHubApp::class),
+    $c->get(RepositoryAccess::class),
+    $c->get(DomainVerifier::class),
+    $c->get(Quota::class),
+    $c->get(RateLimiter::class),
+    $c->get(View::class),
+));
+
+$container->set(AdminController::class, static fn (Container $c): AdminController => new AdminController(
+    $c->get(Database::class),
+    $c->get(JobQueue::class),
     $c->get(View::class),
 ));
 
@@ -147,6 +177,7 @@ $container->set(WebhookController::class, static fn (Container $c): WebhookContr
     $c->get(Database::class),
     $c->get(DeployService::class),
     $c->get(Crypto::class),
+    $c->get(RepositoryAccess::class),
 ));
 
 $container->set(Router::class, static function (): Router {

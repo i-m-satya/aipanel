@@ -22,6 +22,7 @@ const AGENT_VERSION = '0.1.0';
 
 require __DIR__ . '/lib/Exec.php';
 require __DIR__ . '/lib/Templates.php';
+require __DIR__ . '/lib/Container.php';
 require __DIR__ . '/lib/Handlers.php';
 
 final class Agent
@@ -49,6 +50,12 @@ final class Agent
             // One read-only key per node, root-owned: tenants must never read
             // it, since it can fetch every repository hosted here.
             'deploy_key' => '/etc/aipanel/deploy_key',
+            // 'container' gives each tenant its own kernel-level sandbox and is
+            // the only safe mode when strangers can sign up. 'user' is the
+            // single-operator mode: Unix user + chroot + open_basedir only.
+            'isolation' => 'container',
+            'container_runtime' => 'docker',
+            'container_image' => 'aipanel/php:%s',
             'dry_run' => false,
         ];
 
