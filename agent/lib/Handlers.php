@@ -344,27 +344,46 @@ final class Handlers
         $releaseDir = "{$home}/releases/{$release}";
         $log = [];
 
-        // Fetch as the tenant, with the read-only deploy key only.
-        $gitSsh = "/usr/bin/ssh -i {$home}/.ssh/deploy_key -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new";
-        $asUser = ['/usr/bin/sudo', '-u', $user, '-H', '/usr/bin/env', "GIT_SSH_COMMAND={$gitSsh}"];
+        // Git runs as root with the NODE's deploy key, never as the tenant: one
+        // key can read every repository hosted on this node, so a tenant must
+        // never be able to read it. The release is handed to the tenant only
+        // after the checkout, by chown.
+        $deployKey = (string) $config['deploy_key'];
+        if (!$dryRun && !is_readable($deployKey)) {
+            throw new RuntimeException(
+                "Node deploy key missing at {$deployKey}. Run `console.php node:deploy-key` on the control plane."
+            );
+        }
+
+        $gitSsh = implode(' ', [
+            '/usr/bin/ssh',
+            '-i', $deployKey,
+            '-o', 'IdentitiesOnly=yes',
+            '-o', 'StrictHostKeyChecking=accept-new',
+            '-o', 'BatchMode=yes',
+        ]);
+        $git = ['/usr/bin/env', "GIT_SSH_COMMAND={$gitSsh}", 'GIT_TERMINAL_PROMPT=0', '/usr/bin/git'];
 
         if (!is_dir("{$home}/repo.git/objects")) {
-            $log[] = Exec::mustRun([...$asUser, '/usr/bin/git', 'clone', '--bare', "git@github.com:{$repo}.git", "{$home}/repo.git"], $dryRun)['stdout'];
+            $log[] = Exec::mustRun([...$git, 'clone', '--bare', "git@github.com:{$repo}.git", "{$home}/repo.git"], $dryRun)['stdout'];
         }
-        $log[] = Exec::mustRun([...$asUser, '/usr/bin/git', "--git-dir={$home}/repo.git", 'fetch', 'origin', '+refs/heads/*:refs/heads/*', '--prune'], $dryRun)['stdout'];
+        $log[] = Exec::mustRun([...$git, "--git-dir={$home}/repo.git", 'fetch', 'origin', '+refs/heads/*:refs/heads/*', '--prune'], $dryRun)['stdout'];
 
-        // Materialise the exact SHA — never a branch name, so a race on main
-        // cannot deploy something other than what was reviewed.
+        // Materialise the exact SHA — never a branch name, so a race on the
+        // deploy branch cannot ship something other than what was approved.
         if (!$dryRun && !mkdir($releaseDir, 0o755, true) && !is_dir($releaseDir)) {
             throw new RuntimeException("Cannot create {$releaseDir}");
         }
-        Exec::mustRun(['/bin/chown', "{$user}:{$user}", $releaseDir], $dryRun);
         $log[] = Exec::mustRun([
-            ...$asUser, '/usr/bin/git', "--git-dir={$home}/repo.git", "--work-tree={$releaseDir}",
+            ...$git, "--git-dir={$home}/repo.git", "--work-tree={$releaseDir}",
             'checkout', '--force', $commit, '--', '.',
         ], $dryRun)['stdout'];
 
+        // Hand the release to the tenant now that nothing privileged is left in it.
+        Exec::mustRun(['/bin/chown', '-R', "{$user}:{$user}", $releaseDir], $dryRun);
+
         // shared/ state is linked in, never copied, so it survives releases.
+        $asUser = ['/usr/bin/sudo', '-u', $user, '-H'];
         foreach (['.env', 'storage', 'uploads'] as $shared) {
             $source = "{$home}/shared/{$shared}";
             if (is_file($source) || is_dir($source)) {
@@ -385,10 +404,12 @@ final class Handlers
         }
 
         // Health check the new tree before it can serve anyone.
-        $health = Exec::run([...$asUser, '/usr/bin/php', '-l', "{$releaseDir}/index.php"], $dryRun);
-        if (is_file("{$releaseDir}/index.php") && $health['code'] !== 0) {
-            Exec::run(['/bin/rm', '-rf', '--one-file-system', $releaseDir], $dryRun);
-            throw new RuntimeException('Release failed its health check; current release left in place.');
+        if (is_file("{$releaseDir}/index.php")) {
+            $health = Exec::run([...$asUser, '/usr/bin/php', '-l', "{$releaseDir}/index.php"], $dryRun);
+            if ($health['code'] !== 0) {
+                Exec::run(['/bin/rm', '-rf', '--one-file-system', $releaseDir], $dryRun);
+                throw new RuntimeException('Release failed its health check; current release left in place.');
+            }
         }
 
         // Atomic cutover: create the symlink beside the target, then rename
@@ -399,7 +420,7 @@ final class Handlers
             symlink($releaseDir, $staging);
             rename($staging, "{$home}/current");
         }
-        Exec::mustRun(['/bin/systemctl', 'reload', "php-fpm@{$user}"], $dryRun);
+        self::reloadPool($user, $config, $dryRun);
 
         self::pruneReleases($home, keep: 5, dryRun: $dryRun);
 
@@ -437,7 +458,7 @@ final class Handlers
             symlink("{$home}/releases/{$target}", $staging);
             rename($staging, "{$home}/current");
         }
-        Exec::mustRun(['/bin/systemctl', 'reload', "php-fpm@{$user}"], $dryRun);
+        self::reloadPool($user, $config, $dryRun);
 
         return [
             'changed' => true,
@@ -531,6 +552,30 @@ final class Handlers
             'stderr' => $result['stderr'],
             'facts' => ['domain' => $domain, 'certificate' => $certDir],
         ];
+    }
+
+    /**
+     * Reload one tenant's FPM pool.
+     *
+     * Pools live in the shared php{version}-fpm service, so a reload of that
+     * service is what picks up a new release — scoped to this node, never to
+     * another site's web server.
+     */
+    private static function reloadPool(string $user, array $config, bool $dryRun): void
+    {
+        foreach (glob('/etc/php/*/fpm/pool.d/' . $user . '.conf') ?: [] as $pool) {
+            if (preg_match('#/php/([0-9.]+)/#', $pool, $m) === 1) {
+                Exec::mustRun(['/bin/systemctl', 'reload', "php{$m[1]}-fpm"], $dryRun);
+
+                return;
+            }
+        }
+
+        // No pool file found (dry run, or a tenant mid-provision): reloading
+        // nothing is correct, failing the deploy is not.
+        if (!$dryRun) {
+            error_log("aipanel: no FPM pool found for {$user}; skipped reload");
+        }
     }
 
     /** The HTTPS server block, once a certificate exists for the domain. */

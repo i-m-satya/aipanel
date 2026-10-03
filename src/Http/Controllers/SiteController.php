@@ -135,6 +135,25 @@ final class SiteController
 
             $deployKey = $this->deployPublicKeyFor($nodeId);
 
+            // Authorise this node to fetch the repository. Without it the first
+            // deploy fails at git clone with a permission error that looks like
+            // a panel bug rather than a missing key.
+            try {
+                $this->github->addDeployKey(
+                    (int) $installation['id'],
+                    $repo,
+                    'aipanel node ' . $nodeId,
+                    $deployKey
+                );
+            } catch (\RuntimeException $e) {
+                // GitHub rejects a key that is already on the repo, which is the
+                // normal case for the second and later sites on a node.
+                if (!str_contains($e->getMessage(), 'already in use')
+                    && !str_contains($e->getMessage(), 'key is already')) {
+                    throw $e;
+                }
+            }
+
             // Both rows are written in one transaction: a website with only
             // one of its two environments is not a state worth having.
             [$siteId, $productionUser, $sandboxId, $sandboxUser] = $this->db->transaction(

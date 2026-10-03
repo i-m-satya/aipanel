@@ -7,6 +7,7 @@ declare(strict_types=1);
  *
  *   php bin/console.php key:generate            32-byte APP_KEY for secrets at rest
  *   php bin/console.php migrate                 apply pending SQL migrations
+ *   php bin/console.php node:bootstrap-local [port]   single-server setup
  *   php bin/console.php node:add <host> <url> <role>
  *   php bin/console.php node:deploy-key <id>    generate the node's read-only deploy key
  *   php bin/console.php github:install <installation_id> <account_id> <login>
@@ -36,6 +37,65 @@ try {
             fwrite(STDOUT, $ran === []
                 ? "Nothing to migrate.\n"
                 : "Applied:\n  " . implode("\n  ", $ran) . "\n");
+            break;
+
+        case 'node:bootstrap-local':
+            // Single-server install: this host is both the control plane and
+            // the one managed node. Registers it, writes the agent's config,
+            // and mints the node's read-only deploy key — everything the agent
+            // needs to exist before a website can be added.
+            $port = (int) ($args[0] ?? 9443);
+            $db = $container->get(Database::class);
+            $nodes = $container->get(NodeRepository::class);
+            $hostname = gethostname() ?: 'localhost';
+            $endpoint = "http://127.0.0.1:{$port}";
+
+            $existing = $db->selectOne('SELECT id FROM nodes WHERE endpoint = ?', [$endpoint]);
+            if ($existing !== null) {
+                fwrite(STDOUT, "Local node already registered (id {$existing['id']}).\n");
+                break;
+            }
+
+            $secret = bin2hex(random_bytes(32));
+            $nodeId = $nodes->create($hostname, $endpoint, 'web', $secret);
+
+            // The agent reads this; it is the only copy of the node secret.
+            if (!is_dir('/etc/aipanel') && !mkdir('/etc/aipanel', 0o750, true) && !is_dir('/etc/aipanel')) {
+                throw new RuntimeException('Cannot create /etc/aipanel');
+            }
+            $agentConfig = [
+                'secret' => $secret,
+                'role' => 'web',
+                'web_root' => '/srv/sites',
+                'deploy_key' => '/etc/aipanel/deploy_key',
+            ];
+            file_put_contents('/etc/aipanel/agent.json', json_encode($agentConfig, JSON_PRETTY_PRINT) . "\n");
+            chmod('/etc/aipanel/agent.json', 0o600);
+
+            // One read-only deploy key for this node. Root-owned: it can fetch
+            // every repository hosted here, so no tenant may read it.
+            if (!is_file('/etc/aipanel/deploy_key')) {
+                exec(sprintf(
+                    'ssh-keygen -t ed25519 -N "" -C %s -f %s 2>&1',
+                    escapeshellarg('aipanel-node-' . $hostname),
+                    escapeshellarg('/etc/aipanel/deploy_key')
+                ), $output, $code);
+
+                if ($code !== 0) {
+                    throw new RuntimeException('ssh-keygen failed: ' . implode("\n", $output));
+                }
+                chmod('/etc/aipanel/deploy_key', 0o600);
+            }
+
+            $publicKey = trim((string) file_get_contents('/etc/aipanel/deploy_key.pub'));
+            $db->execute(
+                'UPDATE nodes SET deploy_public_key = ?, deploy_key_fingerprint = ? WHERE id = ?',
+                [$publicKey, substr(sha1($publicKey), 0, 32), $nodeId]
+            );
+
+            fwrite(STDOUT, "Local node registered as id {$nodeId} ({$hostname}, role web).\n");
+            fwrite(STDOUT, "Agent config: /etc/aipanel/agent.json\n");
+            fwrite(STDOUT, "Deploy key:   /etc/aipanel/deploy_key (public key stored on the node)\n");
             break;
 
         case 'node:add':
